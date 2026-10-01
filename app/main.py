@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 
 from nicegui import app, ui
 
@@ -169,7 +170,19 @@ def index():
         with ui.tab_panel(tab_server):
             server_panel()
 
-    ui.timer(30.0, lambda: guard.check_all())
+    ui.timer(15.0, poll_due)
+
+
+_poll_state = {"last": 0.0}
+
+
+def poll_due():
+    """Polling lives inside page timers (NiceGUI forbids global-scope UI)."""
+    interval = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0)) * 60
+    if time.time() - _poll_state["last"] >= interval:
+        _poll_state["last"] = time.time()
+        if settings.is_configured():
+            guard.check_all()
 
 
 def rules_panel():
@@ -272,7 +285,5 @@ def server_panel():
         ui.button("测试连接", on_click=test)
 
 
-poll = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0))
-ui.timer(poll * 60, lambda: guard.check_all() if settings.is_configured() else None)
-
-ui.run(host="0.0.0.0", port=8080, title="Jelly Kids Guard")
+if __name__ in ("__main__", "__mp_main__"):
+    ui.run(host="0.0.0.0", port=8080, title="Jelly Kids Guard")
