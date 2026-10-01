@@ -111,7 +111,12 @@ def user_card(box, user_id: str):
             if st.get("reason"):
                 ui.label(st["reason"]).classes("text-sm text-gray-500 break-words")
             if st.get("bonus_eps") or st.get("bonus_min"):
-                ui.label(f"规则外加时剩：{st.get('bonus_eps', 0)} 集 / 约 {st.get('bonus_min', 0)} 分钟"
+                bparts = []
+                if st.get("bonus_eps"):
+                    bparts.append(f"剩 {st['bonus_eps']} 集")
+                if st.get("bonus_min"):
+                    bparts.append(f"剩约 {st['bonus_min']} 分钟")
+                ui.label("规则外加时（" + " / ".join(bparts) + "）"
                          ).classes("text-sm text-blue-600 break-words")
             playing = ""
             try:
