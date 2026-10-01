@@ -82,7 +82,8 @@ class Guard:
                 rule["bonus_min_base"] = None
                 rule["bonus_day"] = ""
                 sess = rule.setdefault("sess", {})
-                sess.update({"date": today, "used": 0, "since": None, "cooldown_until": None})
+                sess.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
+                             "open": True, "last_eps": None, "last_mins": None})
                 if rule.get("enabled"):
                     backup = self._recall(uid)
                     if backup:
@@ -115,10 +116,12 @@ class Guard:
         """取今日 sitting 状态（含跨天滚动），调用方改完后需 save。"""
         rule = self.settings.get_user(user_id)
         st = rule.setdefault("sess", {"date": "", "used": 0, "since": None,
-                                      "cooldown_until": None})
+                                      "cooldown_until": None, "open": True,
+                                      "last_eps": None, "last_mins": None})
         today = self.settings.today_key()
         if st.get("date") != today:
-            st.update({"date": today, "used": 0, "since": None, "cooldown_until": None})
+            st.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
+                       "open": True, "last_eps": None, "last_mins": None})
         return st
 
     @staticmethod
@@ -139,6 +142,7 @@ class Guard:
         st = self._sess(user_id)
         st["since"] = datetime.now().isoformat(timespec="seconds")
         st["cooldown_until"] = None
+        st["open"] = True
 
     def bonus_remaining(self, user_id: str, day_eps: int, day_mins: int) -> tuple[int, int]:
         """规则外剩余加时 (剩几集, 剩几分钟)，按发放时刻的今日累计扣减."""
@@ -197,6 +201,7 @@ class Guard:
         self.clear_bonus(user_id)
         sess = self._sess(user_id)
         sess.update({"used": 0, "since": None, "cooldown_until": None,
+                     "open": True, "last_eps": None, "last_mins": None,
                      "date": self.settings.today_key()})
         self.settings.save()
         return ok, msg
@@ -265,22 +270,28 @@ class Guard:
         # 冷却到点 -> 自动解锁并开启新的一轮
         cd = self._parse(sess.get("cooldown_until"))
         if cd is not None and now >= cd:
-            sess["since"] = now.isoformat(timespec="seconds")
-            sess["cooldown_until"] = None
+            self._reset_sitting(user_id)
             dirty = True
 
+        open_round = bool(sess.get("open", True))
         since = self._parse(sess.get("since"))
         rows = self.stats.today_rows(user_id, start, end)
-        cur = [r for r in rows if since is None or r[0] >= since]
+        if open_round:
+            cur = [r for r in rows if since is None or r[0] >= since]
+        else:
+            cur = []  # 轮已结束：锁后还播的尾巴不计入任何一轮
         sess_eps = len(cur)
         sess_mins = sum(s for _, s in cur) // 60
-        locked, reason = boundary_lock(sess_eps, sess_mins, max_eps, soft_b, min_a)
-        abc_fired = locked
+        locked, reason = False, ""
+        abc_fired = False
         est_next, est_src = 0, ""
-        if not locked and hard_c > 0 and sess_mins > 0:
-            est_next, est_src = self.estimate_next_minutes(user_id, day_eps, day_mins)
-            locked, reason = next_gate(sess_mins, est_next, hard_c)
-            abc_fired = abc_fired or locked
+        if open_round:
+            locked, reason = boundary_lock(sess_eps, sess_mins, max_eps, soft_b, min_a)
+            abc_fired = locked
+            if not locked and hard_c > 0 and sess_mins > 0:
+                est_next, est_src = self.estimate_next_minutes(user_id, day_eps, day_mins)
+                locked, reason = next_gate(sess_mins, est_next, hard_c)
+                abc_fired = abc_fired or locked
         resume_at = None
         used = int(sess.get("used", 0) or 0)
         if not locked and max_sess > 0:
@@ -296,24 +307,34 @@ class Guard:
                     reason = f"冷却中，还差约 {desc}（{cd2.strftime('%H:%M')}后可看下一次）"
                     resume_at = cd2
         if locked and abc_fired and max_sess > 0:
-            # ABC 触发 = 这一轮结束：记次数 + 进冷却（名额用完则一直锁到明天）
+            # ABC 触发 = 这一轮结束：冻结数字、记次数、关轮
             used += 1
             sess["used"] = used
             sess["since"] = now.isoformat(timespec="seconds")
+            sess["open"] = False
+            sess["last_eps"] = sess_eps
+            sess["last_mins"] = sess_mins
             if gap_h > 0 and used < max_sess:
                 sess["cooldown_until"] = (now + timedelta(hours=gap_h)).isoformat(timespec="seconds")
                 resume_at = now + timedelta(hours=gap_h)
                 reason = reason + f"，第 {used} 次结束，冷却至 {resume_at.strftime('%H:%M')}"
             else:
                 sess["cooldown_until"] = None
+                if used < max_sess:
+                    sess["open"] = True  # 间隔=0：新一轮紧接着开
             dirty = True
         if dirty:
             self.settings.save()
         folders = self.client.get_enabled_folders(user_id)
         self._apply_folders(user_id, folders, locked, reason if locked else "")
 
+        # 展示：开轮显示实时累计；关轮（名额用完/冷却中）显示冻结数字
+        if sess.get("open", True) or sess.get("last_eps") is None:
+            disp_eps, disp_mins = sess_eps, sess_mins
+        else:
+            disp_eps, disp_mins = sess["last_eps"], sess["last_mins"]
         st = {
-            "sess_eps": sess_eps, "sess_mins": sess_mins,
+            "sess_eps": disp_eps, "sess_mins": disp_mins,
             "day_eps": day_eps, "day_mins": day_mins,
             "ongoing": bool(playing) and user_id in (playing or {}),
             "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
