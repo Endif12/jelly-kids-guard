@@ -131,20 +131,24 @@ def do_manual(user_id: str, lock: bool):
     render_dashboard()
 
 
+def note(text: str):
+    ui.label(text).classes("text-amber-800 bg-amber-100 p-3 rounded w-full")
+
+
 def render_dashboard():
     if dashboard_box is None:
         return
     dashboard_box.clear()
     if not settings.is_configured():
         with dashboard_box:
-            ui.alert("还没有配置 Jellyfin 服务器，请先到「服务器」页填写地址和 API Key，点保存后再点「同步用户/媒体库」。")
+            note("还没有配置 Jellyfin 服务器，请先到「服务器」页填写地址和 API Key，点保存后再点「同步用户/媒体库」。")
         return
     for uid, rule in settings.data.get("users", {}).items():
         if rule.get("enabled"):
             user_card(dashboard_box, uid)
     if not any(r.get("enabled") for r in settings.data.get("users", {}).values()):
         with dashboard_box:
-            ui.alert("还没有启用任何受控用户，去「规则设置」页添加。")
+            note("还没有启用任何受控用户，去「规则设置」页添加。")
 
 
 # ----- pages -----------------------------------------------------------
@@ -190,7 +194,7 @@ def rules_panel():
         refresh_caches()
     options = dict(users_cache) or {uid: uid for uid in settings.data.get("users", {})}
     if not options:
-        ui.alert("还没有用户数据：请先到「服务器」页保存并同步。")
+        note("还没有用户数据：请先到「服务器」页保存并同步。")
         return
     current = {"uid": next(iter(settings.data.get("users", {}), None)) or next(iter(options))}
 
