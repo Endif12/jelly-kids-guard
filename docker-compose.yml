@@ -2,6 +2,7 @@ services:
   jelly-kids-guard:
     # Ugreen NAS Docker -> Project -> Create project, paste this file (no SSH needed)
     image: ghcr.io/endif12/jelly-kids-guard:latest
+    pull_policy: always
     container_name: jelly-kids-guard
     restart: unless-stopped
     ports:
