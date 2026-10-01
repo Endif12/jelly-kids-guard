@@ -1,0 +1,18 @@
+# ---> Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# ---> App data (local runs only; NAS volume keeps its own copy)
+data/settings.json
+data/*.bck
+data/*.log
+data/*.yaml
+
+# ---> OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
