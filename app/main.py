@@ -109,33 +109,65 @@ def user_card(box, user_id: str):
                     sess_line += f"，冷却至 {st['resume_at']}"
                 ui.label(sess_line).classes("text-sm text-gray-500 break-words")
             if st.get("reason"):
-                ui.label(st["reason"]).classes("text-sm text-gray-500")
+                ui.label(st["reason"]).classes("text-sm text-gray-500 break-words")
+            if st.get("bonus_eps") or st.get("bonus_min"):
+                ui.label(f"规则外加时剩：{st.get('bonus_eps', 0)} 集 / 约 {st.get('bonus_min', 0)} 分钟"
+                         ).classes("text-sm text-blue-600 break-words")
             playing = ""
             try:
                 playing = (guard.client.now_playing() or {}).get(user_id, "")
             except Exception:  # noqa: BLE001
                 pass
             if playing:
-                ui.label(f"正在播放：{playing}").classes("text-sm")
-            with ui.row():
-                ui.button("+10 分钟", on_click=lambda: grant_bonus(user_id, 0, 10))
-                ui.button("+1 集", on_click=lambda: grant_bonus(user_id, 1, 0))
+                ui.label(f"正在播放：{playing}").classes("text-sm break-words")
+            with ui.row().classes("flex-wrap"):
+                ui.button("+5 分钟", on_click=lambda: grant_extra(user_id, "min"))
+                ui.button("+1 集", on_click=lambda: grant_extra(user_id, "eps"))
+                ui.button("撤销加时", on_click=lambda: undo_extra(user_id))
+                ui.button("重置今日", color="orange", on_click=lambda: ask_reset(user_id))
                 ui.button("立即锁", color="red", on_click=lambda: do_manual(user_id, True))
                 ui.button("解锁", color="green", on_click=lambda: do_manual(user_id, False))
 
 
-def grant_bonus(user_id: str, eps: int, mins: int):
-    rule = settings.get_user(user_id)
-    if rule.get("bonus_day") != settings.today_key():
-        rule["bonus_eps"] = 0
-        rule["bonus_minutes"] = 0
-        rule["bonus_day"] = settings.today_key()
-    rule["bonus_eps"] = int(rule.get("bonus_eps", 0)) + eps
-    rule["bonus_minutes"] = int(rule.get("bonus_minutes", 0)) + mins
-    settings.save()
+def grant_extra(user_id: str, kind: str):
+    if kind == "min":
+        guard.grant_minutes(user_id, 5)
+        ui.notify("已加 5 分钟（规则外，播完当前集前不锁）")
+    else:
+        guard.grant_episode(user_id)
+        ui.notify("已加 1 集（规则外，下集可播）")
     guard.check_user(user_id)
-    ui.notify(f"已为今日增加 {eps} 集 / {mins} 分钟")
-    render_dashboard()
+    refresh_all_panels()
+
+
+def undo_extra(user_id: str):
+    guard.clear_bonus(user_id)
+    guard.check_user(user_id)
+    ui.notify("已撤销加时，规则恢复")
+    refresh_all_panels()
+
+
+reset_box = {"dlg": None, "uid": None}
+
+
+def ask_reset(user_id: str):
+    reset_box["uid"] = user_id
+    if reset_box["dlg"] is not None:
+        reset_box["dlg"].open()
+    else:
+        ui.notify("确认框未就绪，请刷新页面")
+
+
+def do_reset():
+    uid = reset_box["uid"]
+    if reset_box["dlg"] is not None:
+        reset_box["dlg"].close()
+    if not uid:
+        return
+    ok, msg = guard.reset_today(uid)
+    guard.check_user(uid)
+    ui.notify(msg, color="green" if ok else "red")
+    refresh_all_panels()
 
 
 def do_manual(user_id: str, lock: bool):
@@ -169,8 +201,16 @@ def render_dashboard():
 @ui.page("/", title="Jelly Kids Guard")
 def index():
     global dashboard_box, rules_box
-    ui.label("Jelly Kids Guard｜儿童观影守护").classes("text-2xl font-bold")
-    ui.label("A保障 + B软上限 + C硬上限（下集预判），超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500")
+    ui.label("Jelly Kids Guard｜儿童观影守护").classes("text-2xl font-bold break-words")
+    ui.label("A保障 + B软上限 + C硬上限（下集预判），超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500 break-words")
+
+    with ui.dialog() as dlg, ui.card():
+        ui.label("确定清零今日播放记录吗？").classes("font-bold break-words")
+        ui.label("该用户的今日集数和分钟归零，加时同步撤销，且不可恢复。").classes("text-sm text-gray-500 break-words")
+        with ui.row():
+            ui.button("确认清零", color="red", on_click=do_reset)
+            ui.button("取消", on_click=dlg.close)
+    reset_box["dlg"] = dlg
 
     with ui.tabs() as tabs:
         tab_dash = ui.tab("看板")
@@ -229,15 +269,17 @@ def rules_editor(options):
         box.clear()
         rule = settings.get_user(uid)
         with box:
-            ui.label(f"用户：{users_cache.get(uid, uid)}").classes("font-bold")
+            ui.label(f"用户：{users_cache.get(uid, uid)}").classes("font-bold break-words")
             ui.checkbox("启用管控", value=rule.get("enabled", True),
                         on_change=lambda e: save_field(uid, "enabled", e.value))
-            ui.number("A 最低保障分钟（没看够不锁，0=关闭）", value=rule.get("min_minutes", 0), min=0,
+            ui.number("A 最低保障分钟", value=rule.get("min_minutes", 0), min=0,
                       step=5, on_change=lambda e: save_field(uid, "min_minutes", int(e.value or 0)))
+            ui.label("没看够 A 不锁；0=关闭").classes("text-xs text-gray-500 break-words")
             lib_options = dict(libs_cache)
-            ui.select(lib_options, multiple=True, label="超限后仍保留的媒体库（白名单）",
+            ui.select(lib_options, multiple=True, label="超限保留媒体库",
                       value=[f for f in rule.get("keep_folders", []) if f in lib_options],
                       on_change=lambda e: save_field(uid, "keep_folders", list(e.value or []))).classes("w-full")
+            ui.label("白名单：超限锁定后仍保留的库").classes("text-xs text-gray-500 break-words")
             ui.label("按星期设置每天上限（0 = 不限该项，需满足 A≤B≤C）").classes(
                 "font-bold mt-2 break-words")
             ui.label("集数=最多集数 B=软上限(分) C=硬上限(分) 次数=观看次数 间隔=两次间隔(小时)").classes(
@@ -267,9 +309,6 @@ def rules_editor(options):
                               ).classes("w-full").props("dense")
             with ui.row().classes("mt-2"):
                 ui.button("保存", color="green", on_click=lambda: (settings.save(), ui.notify("已保存")))
-                ui.button("今日临时 +10 分钟", on_click=lambda: grant_bonus(uid, 0, 10))
-                ui.button("清除今日临时额度",
-                          on_click=lambda: clear_bonus(uid))
 
     def save_field(uid: str, key: str, value):
         settings.get_user(uid)[key] = value
@@ -279,14 +318,6 @@ def rules_editor(options):
         settings.get_user(uid)["days"][str(weekday)][key] = value
         settings.save()
 
-    def clear_bonus(uid: str):
-        rule = settings.get_user(uid)
-        rule["bonus_eps"] = 0
-        rule["bonus_minutes"] = 0
-        rule["bonus_day"] = ""
-        settings.save()
-        ui.notify("已清除今日临时额度")
-
     ui.select(options, label="选择要设置的用户（自动从 Jellyfin 获取）",
               value=current["uid"], on_change=lambda e: editor(e.value)).classes("w-full")
     box = ui.column().classes("w-full")
@@ -295,14 +326,16 @@ def rules_editor(options):
 
 def server_panel():
     srv = settings.server
-    host_in = ui.input("Jellyfin 地址（如 http://192.168.1.111:8096）", value=srv.get("host", "")).classes("w-full")
+    host_in = ui.input("Jellyfin 服务器地址", value=srv.get("host", "")).classes("w-full")
+    ui.label("如 http://192.168.1.111:8096").classes("text-xs text-gray-500 break-words")
     token_in = ui.input("管理员 API Key", password=True, value=srv.get("token", "")).classes("w-full")
     poll_in = ui.number("轮询间隔（分钟）", value=settings.data.get("polling_minutes", 1.0),
                         min=0.2, step=0.1)
     scope_in = ui.select(COUNT_SCOPES, label="集数统计口径",
                          value=settings.data.get("count_scope", "episode")).classes("w-full")
-    fallback_in = ui.number("下集预判兜底分钟（拿不到真实/平均时长时用）",
+    fallback_in = ui.number("下集预判兜底分钟",
                             value=settings.data.get("fallback_episode_minutes", 25), min=0, step=5)
+    ui.label("拿不到真实下集/平均时长时使用").classes("text-xs text-gray-500 break-words")
 
     def save():
         settings.server["host"] = (host_in.value or "").strip().rstrip("/")

@@ -38,9 +38,13 @@ def default_user_rule():
         "enabled": True,
         "min_minutes": 0,
         "keep_folders": [],
-        "bonus_eps": 0,
-        "bonus_minutes": 0,
+        # 规则外加时（看板手动发放，當天有效）：bonus_eps=多看几集，
+        # bonus_min=多看几分钟；_base 为发放时刻的今日累计，用于扣减。
         "bonus_day": "",
+        "bonus_eps": 0,
+        "bonus_eps_base": None,
+        "bonus_min": 0,
+        "bonus_min_base": None,
         "days": {str(i): default_day_rule() for i in range(7)},
     }
 
@@ -63,6 +67,8 @@ def _migrate(settings: dict) -> dict:
     for uid, rule in list(settings.get("users", {}).items()):
         full = default_user_rule()
         full.update(rule or {})
+        # 兼容旧版“临时额度”字段：旧 bonus_minutes 语义不同，直接丢弃
+        full.pop("bonus_minutes", None)
         days = {}
         for i in range(7):
             old = ((rule or {}).get("days") or {}).get(str(i), {})
@@ -131,19 +137,14 @@ class SettingsStore:
         return self.get_user(user_id)["days"].get(str(self.weekday()), default_day_rule())
 
     def effective_limits(self, user_id: str):
-        """Return (max_eps, soft_B, hard_C, min_A) for today incl. bonus.
+        """Return (max_eps, soft_B, hard_C, min_A) for today.
 
-        Bonus only applies on the day it was granted (bonus_day guard).
-        Non-positive max/soft/hard means unlimited/off; A <= 0 disables guarantee.
-        Bonus extends B and C (extra time), never the episode count cap.
+        看板发放的规则外加时不再混入限额（旧逻辑已删除），而是在
+        结算时整段豁免。Non-positive max/soft/hard means unlimited/off.
         """
         rule = self.get_user(user_id)
         day = rule["days"].get(str(self.weekday()), default_day_rule())
         max_eps = int(day.get("max_eps", 0) or 0)
         soft_b = int(day.get("soft_minutes", 0) or 0)
         hard_c = int(day.get("hard_total", 0) or 0)
-        if rule.get("bonus_day") == self.today_key():
-            soft_b += int(rule.get("bonus_minutes", 0) or 0)
-            hard_c += int(rule.get("bonus_minutes", 0) or 0)
-            max_eps += int(rule.get("bonus_eps", 0) or 0)
         return max_eps, soft_b, hard_c, int(rule.get("min_minutes", 0) or 0)

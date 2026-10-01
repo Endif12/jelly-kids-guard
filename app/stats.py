@@ -68,6 +68,21 @@ class PlaybackStats:
             logger.error("stats parse error %s", exc)
             return 0, 0
 
+    def reset_day(self, user_id: str, date_start: str, date_end: str) -> tuple[bool, str]:
+        """删除该用户今日播放记录（测试清零用，不可恢复）.
+
+        Playback Reporting 官方前端删记录也是走 submit_custom_query 发 DELETE。
+        """
+        sql = (f"DELETE FROM PlaybackActivity WHERE {self._where(user_id, date_start, date_end)}")
+        data = self._query(sql)
+        if not isinstance(data, dict):
+            return False, "删除请求失败（看日志）"
+        msg = str(data.get("message", ""))
+        if "error" in msg.lower():
+            logger.error("reset_day SQL error: %s", msg)
+            return False, f"删除失败：{msg[:200]}"
+        return True, "今日记录已清零"
+
     def today_rows(self, user_id: str, date_start: str, date_end: str,
                    limit: int = 500) -> list[tuple[datetime, int]]:
         """Return [(start, seconds)] detail rows for session splitting."""
