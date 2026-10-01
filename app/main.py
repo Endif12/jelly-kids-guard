@@ -97,9 +97,14 @@ def user_card(box, user_id: str):
                     "已锁定" if locked else "正常")
             ui.label(f"今日：{eps} 集 / {mins} 分钟 ｜ 上限：{fmt_limit(max_eps)} 集 / "
                      f"B {fmt_limit(soft_b)} 分钟 / C {fmt_limit(hard_c)} 分钟 ｜ "
-                     f"保障 A：{rule.get('min_minutes', 0)} 分钟")
+                     f"保障 A：{rule.get('min_minutes', 0)} 分钟").classes("break-words")
             if st.get("est_next"):
-                ui.label(f"下集预判约 {st['est_next']} 分钟（{st.get('est_src', '')}）").classes("text-sm text-gray-500")
+                ui.label(f"下集预判约 {st['est_next']} 分钟（{st.get('est_src', '')}）").classes("text-sm text-gray-500 break-words")
+            if st.get("sess_max"):
+                sess_line = f"今日已看 {st.get('sess_used', 0)} 次 / 上限 {st['sess_max']} 次"
+                if st.get("resume_at"):
+                    sess_line += f"，冷却至 {st['resume_at']}"
+                ui.label(sess_line).classes("text-sm text-gray-500 break-words")
             if st.get("reason"):
                 ui.label(st["reason"]).classes("text-sm text-gray-500")
             playing = ""
@@ -214,7 +219,8 @@ def render_rules():
 
 
 def rules_editor(options):
-    current = {"uid": next(iter(settings.data.get("users", {}).keys()), None) or next(iter(options))}
+    saved = next(iter(settings.data.get("users", {}).keys()), None)
+    current = {"uid": saved if saved in options else next(iter(options))}
 
     def editor(uid: str):
         box.clear()
@@ -229,21 +235,33 @@ def rules_editor(options):
             ui.select(lib_options, multiple=True, label="超限后仍保留的媒体库（白名单）",
                       value=[f for f in rule.get("keep_folders", []) if f in lib_options],
                       on_change=lambda e: save_field(uid, "keep_folders", list(e.value or []))).classes("w-full")
-            ui.label("按星期设置每天上限（0 = 不限该项，需满足 A≤B≤C）").classes("font-bold mt-2")
-            with ui.grid(columns=4).classes("gap-2"):
-                ui.label("星期").classes("font-bold")
-                ui.label("最多集数").classes("font-bold")
-                ui.label("B 软上限(分)").classes("font-bold")
-                ui.label("C 硬上限(分)").classes("font-bold")
+            ui.label("按星期设置每天上限（0 = 不限该项，需满足 A≤B≤C）").classes(
+                "font-bold mt-2 break-words")
+            ui.label("集数=最多集数 B=软上限(分) C=硬上限(分) 次数=观看次数 间隔=两次间隔(小时)").classes(
+                "text-xs text-gray-500 break-words")
+            with ui.grid(columns=6).classes("gap-2").style(
+                    "grid-template-columns: 2.5em repeat(5, minmax(0, 1fr));"):
+                for h in ["星期", "集数", "B分", "C分", "次数", "间隔h"]:
+                    ui.label(h).classes("font-bold text-sm").style(
+                        "white-space: normal; word-break: break-all;")
                 for i, wd in enumerate(WEEKDAYS):
                     day = rule["days"][str(i)]
-                    ui.label(wd)
+                    ui.label(wd).classes("text-sm").style("white-space: normal;")
                     ui.number(min=0, step=1, value=day["max_eps"],
-                              on_change=lambda e, i=i: save_day(uid, i, "max_eps", int(e.value or 0)))
+                              on_change=lambda e, i=i: save_day(uid, i, "max_eps", int(e.value or 0))
+                              ).classes("w-full").props("dense")
                     ui.number(min=0, step=5, value=day.get("soft_minutes", 0),
-                              on_change=lambda e, i=i: save_day(uid, i, "soft_minutes", int(e.value or 0)))
+                              on_change=lambda e, i=i: save_day(uid, i, "soft_minutes", int(e.value or 0))
+                              ).classes("w-full").props("dense")
                     ui.number(min=0, step=5, value=day.get("hard_total", 0),
-                              on_change=lambda e, i=i: save_day(uid, i, "hard_total", int(e.value or 0)))
+                              on_change=lambda e, i=i: save_day(uid, i, "hard_total", int(e.value or 0))
+                              ).classes("w-full").props("dense")
+                    ui.number(min=0, step=1, value=day.get("max_sessions", 0),
+                              on_change=lambda e, i=i: save_day(uid, i, "max_sessions", int(e.value or 0))
+                              ).classes("w-full").props("dense")
+                    ui.number(min=0, step=0.5, value=day.get("gap_hours", 0),
+                              on_change=lambda e, i=i: save_day(uid, i, "gap_hours", float(e.value or 0))
+                              ).classes("w-full").props("dense")
             with ui.row().classes("mt-2"):
                 ui.button("保存", color="green", on_click=lambda: (settings.save(), ui.notify("已保存")))
                 ui.button("今日临时 +10 分钟", on_click=lambda: grant_bonus(uid, 0, 10))

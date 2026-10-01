@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import yaml
 
 from jellyfin_client import JellyfinClient
-from rules import boundary_lock, next_gate
+from rules import boundary_lock, next_gate, session_gate, split_sessions
 from stats import PlaybackStats
 from store import SettingsStore
 
@@ -101,12 +101,32 @@ class Guard:
 
     def check_user(self, user_id: str) -> dict:
         """Poll one user, enforce, return status dict for the UI."""
+        from datetime import datetime
+
         start, end = self._day_range()
         eps, mins = self.stats.today(user_id, start, end)
         max_eps, soft_b, hard_c, min_a = self.settings.effective_limits(user_id)
+        day = self.settings.today_rule(user_id)
+        max_sess = int(day.get("max_sessions", 0) or 0)
+        gap_h = float(day.get("gap_hours", 0) or 0)
         locked, reason = boundary_lock(eps, mins, max_eps, soft_b, min_a)
         est_next, est_src = 0, ""
-        if not locked:
+        sess_used, sess_max, resume_at = 0, max_sess, None
+        if not locked and (max_sess > 0 or hard_c > 0):
+            rows = self.stats.today_rows(user_id, start, end) if max_sess > 0 else []
+            sessions = split_sessions(rows)
+            try:
+                playing = self.client.now_playing()
+            except Exception:  # noqa: BLE001
+                playing = {}
+            active = user_id in playing
+            completed = len(sessions) - (1 if (active and sessions) else 0)
+            last_end = sessions[-1][1] if (sessions and not active) else None
+            sess_used = completed
+            if max_sess > 0:
+                locked, reason, resume_at = session_gate(
+                    completed, last_end, datetime.now(), max_sess, gap_h)
+        if not locked and hard_c > 0:
             est_next, est_src = self.estimate_next_minutes(user_id, eps, mins)
             locked, reason = next_gate(mins, est_next, hard_c)
         folders = self.client.get_enabled_folders(user_id)
@@ -132,6 +152,8 @@ class Guard:
             "eps": eps, "mins": mins,
             "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
             "min_a": min_a, "est_next": est_next, "est_src": est_src,
+            "sess_used": sess_used, "sess_max": sess_max,
+            "resume_at": resume_at.strftime("%H:%M") if resume_at else "",
             "locked": locked, "reason": reason,
             "folders": folders,
         }

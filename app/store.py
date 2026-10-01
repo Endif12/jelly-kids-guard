@@ -26,8 +26,11 @@ SCOPE_ITEM_TYPES = {
 
 
 def default_day_rule():
-    # B = soft cap minutes, C = hard total cap minutes (0 = off)
-    return {"max_eps": 2, "soft_minutes": 40, "hard_total": 60}
+    # max_eps: 最多集数；soft_minutes: B 软上限；hard_total: C 硬上限；
+    # max_sessions: 观看次数(0=不限)；gap_hours: 两次之间需间隔小时(0=不要求)。
+    # 0 均为关闭该项。
+    return {"max_eps": 2, "soft_minutes": 40, "hard_total": 60,
+            "max_sessions": 0, "gap_hours": 0}
 
 
 def default_user_rule():
@@ -64,7 +67,8 @@ def _migrate(settings: dict) -> dict:
         for i in range(7):
             old = ((rule or {}).get("days") or {}).get(str(i), {})
             # Migrate v1 key max_minutes -> soft_minutes (B)
-            day = {"max_eps": 2, "soft_minutes": 40, "hard_total": 60}
+            day = {"max_eps": 2, "soft_minutes": 40, "hard_total": 60,
+                   "max_sessions": 0, "gap_hours": 0}
             if "max_minutes" in old and "soft_minutes" not in old:
                 old = dict(old)
                 old["soft_minutes"] = old.pop("max_minutes")
@@ -73,6 +77,8 @@ def _migrate(settings: dict) -> dict:
                 "max_eps": int(day.get("max_eps", 2) or 0),
                 "soft_minutes": int(day.get("soft_minutes", 40) or 0),
                 "hard_total": int(day.get("hard_total", 60) or 0),
+                "max_sessions": int(day.get("max_sessions", 0) or 0),
+                "gap_hours": float(day.get("gap_hours", 0) or 0),
             }
         full["days"] = days
         full["min_minutes"] = int(full.get("min_minutes", 0) or 0)
@@ -120,6 +126,9 @@ class SettingsStore:
 
     def weekday(self) -> int:
         return datetime.now().weekday()  # 0 = Monday
+
+    def today_rule(self, user_id: str) -> dict:
+        return self.get_user(user_id)["days"].get(str(self.weekday()), default_day_rule())
 
     def effective_limits(self, user_id: str):
         """Return (max_eps, soft_B, hard_C, min_A) for today incl. bonus.
