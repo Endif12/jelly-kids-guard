@@ -14,7 +14,8 @@ from datetime import datetime, timedelta
 import yaml
 
 from jellyfin_client import JellyfinClient
-from rules import boundary_lock, next_gate, session_gate, split_sessions
+from rules import (IDLE_MINUTES, MIN_COUNTED_MINUTES, boundary_lock, clusters,
+                   next_gate, session_gate, split_sessions)
 from stats import PlaybackStats
 from store import SettingsStore
 
@@ -99,36 +100,55 @@ class Guard:
         fallback = int(self.settings.data.get("fallback_episode_minutes", 25) or 0)
         return (fallback, "fallback") if fallback > 0 else (0, "")
 
-    def check_user(self, user_id: str) -> dict:
-        """Poll one user, enforce, return status dict for the UI."""
-        from datetime import datetime
+    def check_user(self, user_id: str, playing: dict | None = None) -> dict:
+        """Poll one user, enforce, return status dict for the UI.
+
+        A/B/C settle per viewing session (counters reset each time);
+        the day only carries quota + cooldown. playing optionally
+        carries one shared /Sessions snapshot for all users.
+        """
+        from datetime import datetime, timedelta
 
         start, end = self._day_range()
-        eps, mins = self.stats.today(user_id, start, end)
-        max_eps, soft_b, hard_c, min_a = self.settings.effective_limits(user_id)
-        day = self.settings.today_rule(user_id)
-        max_sess = int(day.get("max_sessions", 0) or 0)
-        gap_h = float(day.get("gap_hours", 0) or 0)
-        locked, reason = boundary_lock(eps, mins, max_eps, soft_b, min_a)
-        est_next, est_src = 0, ""
-        sess_used, sess_max, resume_at = 0, max_sess, None
-        if not locked and (max_sess > 0 or hard_c > 0):
-            rows = self.stats.today_rows(user_id, start, end) if max_sess > 0 else []
-            sessions = split_sessions(rows)
+        now = datetime.now()
+        day_eps, day_mins = self.stats.today(user_id, start, end)
+        rows = self.stats.today_rows(user_id, start, end)
+        groups = clusters(rows)
+        if playing is None:
             try:
                 playing = self.client.now_playing()
             except Exception:  # noqa: BLE001
                 playing = {}
-            active = user_id in playing
-            completed = len(sessions) - (1 if (active and sessions) else 0)
-            last_end = sessions[-1][1] if (sessions and not active) else None
-            sess_used = completed
-            if max_sess > 0:
-                locked, reason, resume_at = session_gate(
-                    completed, last_end, datetime.now(), max_sess, gap_h)
-        if not locked and hard_c > 0:
-            est_next, est_src = self.estimate_next_minutes(user_id, eps, mins)
-            locked, reason = next_gate(mins, est_next, hard_c)
+        active = user_id in (playing or {})
+        fresh = bool(groups) and (now - groups[-1]["end"]) <= timedelta(minutes=IDLE_MINUTES)
+        # active + stale/empty = 刚起播新的一次（插件还没记上），计数从 0 开始；
+        # 不 active = 两次之间，A/B/C 不结算（由次数+间隔管下一次能不能起播）。
+        ongoing = active and fresh
+        if ongoing:
+            cur = groups[-1]["rows"]
+            done_groups = groups[:-1]
+        else:
+            cur = []
+            done_groups = groups
+        # 误触几分钟的不算用掉一次
+        done_groups = [g for g in done_groups
+                       if sum(s for _, s in g["rows"]) >= MIN_COUNTED_MINUTES * 60]
+        completed = len(done_groups)
+        last_end = done_groups[-1]["end"] if done_groups else None
+        sess_eps = len(cur)
+        sess_mins = sum(s for _, s in cur) // 60
+        max_eps, soft_b, hard_c, min_a = self.settings.effective_limits(user_id)
+        day = self.settings.today_rule(user_id)
+        max_sess = int(day.get("max_sessions", 0) or 0)
+        gap_h = float(day.get("gap_hours", 0) or 0)
+        locked, reason = boundary_lock(sess_eps, sess_mins, max_eps, soft_b, min_a)
+        est_next, est_src = 0, ""
+        if not locked and hard_c > 0 and sess_mins > 0:
+            est_next, est_src = self.estimate_next_minutes(user_id, day_eps, day_mins)
+            locked, reason = next_gate(sess_mins, est_next, hard_c)
+        resume_at = None
+        if not locked and max_sess > 0:
+            locked, reason, resume_at = session_gate(completed, last_end, now, max_sess, gap_h)
         folders = self.client.get_enabled_folders(user_id)
         rule = self.settings.get_user(user_id)
         keep = [f for f in folders if f in (rule.get("keep_folders") or [])]
@@ -149,10 +169,12 @@ class Guard:
                 logger.info("restore %s", user_id)
 
         st = {
-            "eps": eps, "mins": mins,
+            "sess_eps": sess_eps, "sess_mins": sess_mins,
+            "day_eps": day_eps, "day_mins": day_mins,
+            "ongoing": ongoing,
             "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
             "min_a": min_a, "est_next": est_next, "est_src": est_src,
-            "sess_used": sess_used, "sess_max": sess_max,
+            "sess_used": completed, "sess_max": max_sess,
             "resume_at": resume_at.strftime("%H:%M") if resume_at else "",
             "locked": locked, "reason": reason,
             "folders": folders,
@@ -164,10 +186,14 @@ class Guard:
         self._maybe_new_day()
         if not self.settings.is_configured():
             return {}
+        try:
+            playing = self.client.now_playing()
+        except Exception:  # noqa: BLE001
+            playing = {}
         for uid, rule in self.settings.data.get("users", {}).items():
             if rule.get("enabled"):
                 try:
-                    self.check_user(uid)
+                    self.check_user(uid, playing)
                 except Exception:  # keep polling other users
                     logger.exception("check failed for %s", uid)
         return self.status

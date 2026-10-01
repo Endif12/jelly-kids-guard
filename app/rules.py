@@ -1,15 +1,13 @@
 """Lock decision engine: A (guarantee) / B (soft cap) / C (hard cap w/ lookahead).
 
-Final spec (A <= B <= C, all minutes unless noted):
+Final spec (A <= B <= C, all minutes unless noted). A/B/C settle
+**per viewing session** (each “次” resets counters); the day only
+carries the session quota + cooldown:
 
-* Episode line: eps >= max_eps AND mins >= A  -> lock (soft).
-* Time line:    mins >= B                    -> lock (soft, whatever eps is;
-                e.g. a single 45-min episode locks right after it ends).
-* Next-episode gate C (only once something was watched today, mins > 0):
-  est = estimated next-episode minutes (real NextUp > series average >
-        today's average > fallback). If mins + est > C -> lock NOW
-        (soft lock never cuts the running episode; the next one won't open).
-        Else allow the next episode.
+* Episode line: sess_eps >= max_eps AND sess_mins >= A  -> lock (soft).
+* Time line:    sess_mins >= B                         -> lock (soft).
+* Next-episode gate C (only once something was watched in THIS
+  session, sess_mins > 0): sess_mins + est_next > C -> lock NOW.
 * max_eps/max_* <= 0 means unlimited on that axis; A <= 0 disables guarantee.
 
 Examples (max 2 eps, A=20, B=40, C=60):
@@ -27,6 +25,8 @@ from datetime import datetime, timedelta
 
 #:，两次播放记录相隔超过该分钟数即算另一次观看（用于“今日观看次数”）。
 IDLE_MINUTES = 30
+#: 单次观看总时长低于该分钟数不计入“次数”（误触几分钟不算用掉一次）。
+MIN_COUNTED_MINUTES = 3
 
 
 def boundary_lock(eps: int, mins: int, max_eps: int, soft_b: int,
@@ -61,20 +61,23 @@ def remaining(eps: int, mins: int, max_eps: int, soft_b: int) -> tuple[str, str]
 
 def split_sessions(rows: list[tuple[datetime, int]],
                    idle_minutes: int = IDLE_MINUTES) -> list[tuple[datetime, datetime]]:
-    """把今日播放记录按空闲间隔聚成“观看次数”.
+    """把今日播放记录按空闲间隔聚成“观看次数”，返回 [(开始, 结束)]。"""
+    return [(g["start"], g["end"]) for g in clusters(rows, idle_minutes)]
 
-    rows: [(开始时间, 秒数)]；返回 [(session开始, session结束)]。
-    相邻两条“上一条结束 ~ 下一条开始”超过 idle_minutes 即另起一次。
-    """
-    sessions: list[tuple[datetime, datetime]] = []
+
+def clusters(rows: list[tuple[datetime, int]],
+             idle_minutes: int = IDLE_MINUTES) -> list[dict]:
+    """同 split_sessions，但保留每簇原始记录，供“本次”结算用."""
+    groups: list[dict] = []
     for start, secs in sorted(rows, key=lambda r: r[0]):
         end = start + timedelta(seconds=max(0, secs))
-        if sessions and (start - sessions[-1][1]) <= timedelta(minutes=idle_minutes):
-            s0, e0 = sessions[-1]
-            sessions[-1] = (s0, max(e0, end))
+        if groups and (start - groups[-1]["end"]) <= timedelta(minutes=idle_minutes):
+            g = groups[-1]
+            g["rows"].append((start, secs))
+            g["end"] = max(g["end"], end)
         else:
-            sessions.append((start, end))
-    return sessions
+            groups.append({"start": start, "end": end, "rows": [(start, secs)]})
+    return groups
 
 
 def session_gate(completed: int, last_end: datetime | None, now: datetime,

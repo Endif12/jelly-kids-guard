@@ -83,7 +83,8 @@ def user_card(box, user_id: str):
     rule = settings.get_user(user_id)
     name = users_cache.get(user_id, user_id)
     st = guard.status.get(user_id, {})
-    eps, mins = st.get("eps", 0), st.get("mins", 0)
+    seps, smins = st.get("sess_eps", 0), st.get("sess_mins", 0)
+    deps, dmins = st.get("day_eps", 0), st.get("day_mins", 0)
     day = rule["days"][str(settings.weekday())]
     max_eps = st.get("max_eps", day["max_eps"])
     soft_b = st.get("soft_b", day.get("soft_minutes", 0))
@@ -93,9 +94,11 @@ def user_card(box, user_id: str):
         with ui.card().classes("w-full"):
             with ui.row().classes("items-center justify-between w-full"):
                 ui.label(f"{name}（{WEEKDAYS[settings.weekday()]}）").classes("text-lg font-bold")
-                ui.badge("已锁定", color="red" if locked else "green").set_text(
-                    "已锁定" if locked else "正常")
-            ui.label(f"今日：{eps} 集 / {mins} 分钟 ｜ 上限：{fmt_limit(max_eps)} 集 / "
+                badge = "播放中" if st.get("ongoing") else ("已锁定" if locked else "正常")
+                ui.badge(badge, color="blue" if st.get("ongoing") and not locked
+                         else ("red" if locked else "green")).set_text(badge)
+            ui.label(f"本次：{seps} 集 / {smins} 分钟 ｜ 今日：{deps} 集 / {dmins} 分钟").classes("break-words")
+            ui.label(f"本次上限：{fmt_limit(max_eps)} 集 / "
                      f"B {fmt_limit(soft_b)} 分钟 / C {fmt_limit(hard_c)} 分钟 ｜ "
                      f"保障 A：{rule.get('min_minutes', 0)} 分钟").classes("break-words")
             if st.get("est_next"):
