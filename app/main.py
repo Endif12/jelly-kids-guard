@@ -28,6 +28,12 @@ guard = Guard(settings)
 users_cache: dict[str, str] = {}
 libs_cache: dict[str, str] = {}
 dashboard_box = None
+rules_box = None
+
+
+def refresh_all_panels():
+    render_dashboard()
+    render_rules()
 
 
 # ----- helpers ---------------------------------------------------------
@@ -154,7 +160,7 @@ def render_dashboard():
 # ----- pages -----------------------------------------------------------
 @ui.page("/", title="Jelly Kids Guard")
 def index():
-    global dashboard_box
+    global dashboard_box, rules_box
     ui.label("Jelly Kids Guard｜儿童观影守护").classes("text-2xl font-bold")
     ui.label("A保障 + B软上限 + C硬上限（下集预判），超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500")
 
@@ -166,11 +172,13 @@ def index():
         with ui.tab_panel(tab_dash):
             with ui.row():
                 ui.button("刷新状态", on_click=lambda: (guard.check_all(), render_dashboard()))
-                ui.button("同步用户/媒体库", on_click=lambda: (ui.notify(refresh_caches()), render_dashboard()))
+                ui.button("同步用户/媒体库",
+                          on_click=lambda: (ui.notify(refresh_caches()), refresh_all_panels()))
             dashboard_box = ui.column().classes("w-full")
             render_dashboard()
         with ui.tab_panel(tab_rules):
-            rules_panel()
+            rules_box = ui.column().classes("w-full")
+            render_rules()
         with ui.tab_panel(tab_server):
             server_panel()
 
@@ -189,13 +197,23 @@ def poll_due():
             guard.check_all()
 
 
-def rules_panel():
+def render_rules():
+    if rules_box is None:
+        return
+    rules_box.clear()
     if not users_cache and settings.is_configured():
         refresh_caches()
     options = dict(users_cache) or {uid: uid for uid in settings.data.get("users", {})}
     if not options:
-        note("还没有用户数据：请先到「服务器」页保存并同步。")
+        with rules_box:
+            note(f"还没有用户数据（当前缓存：用户 {len(users_cache)} 个，媒体库 {len(libs_cache)} 个）："
+                 "请先到「服务器」页保存并同步；若同步后仍是 0 个，请看容器日志里的 GET /Users 报错。")
         return
+    with rules_box:
+        rules_editor(options)
+
+
+def rules_editor(options):
     current = {"uid": next(iter(settings.data.get("users", {}), None)) or next(iter(options))}
 
     def editor(uid: str):
@@ -274,7 +292,7 @@ def server_panel():
         settings.save()
         guard.reconnect()
         ui.notify(refresh_caches())
-        render_dashboard()
+        refresh_all_panels()
 
     def test():
         guard.reconnect()
