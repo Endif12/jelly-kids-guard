@@ -214,7 +214,7 @@ def render_rules():
 
 
 def rules_editor(options):
-    current = {"uid": next(iter(settings.data.get("users", {}), None)) or next(iter(options))}
+    current = {"uid": next(iter(settings.data.get("users", {}).keys()), None) or next(iter(options))}
 
     def editor(uid: str):
         box.clear()
