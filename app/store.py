@@ -45,6 +45,10 @@ def default_user_rule():
         "bonus_eps_base": None,
         "bonus_min": 0,
         "bonus_min_base": None,
+        # “一次”= 完整 ABC 周期：从上次 ABC 锁（或冷却结束/手动解锁/
+        # 新的一天）之后开始累计，ABC 触发才算用掉一次。
+        # used=今日已完成次数；since=本轮开始时间(ISO)；cooldown_until=冷却到何时。
+        "sess": {"date": "", "used": 0, "since": None, "cooldown_until": None},
         "days": {str(i): default_day_rule() for i in range(7)},
     }
 
@@ -69,6 +73,9 @@ def _migrate(settings: dict) -> dict:
         full.update(rule or {})
         # 兼容旧版“临时额度”字段：旧 bonus_minutes 语义不同，直接丢弃
         full.pop("bonus_minutes", None)
+        sess = {"date": "", "used": 0, "since": None, "cooldown_until": None}
+        sess.update(full.get("sess") or {})
+        full["sess"] = sess
         days = {}
         for i in range(7):
             old = ((rule or {}).get("days") or {}).get(str(i), {})

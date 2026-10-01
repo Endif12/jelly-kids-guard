@@ -104,7 +104,7 @@ def user_card(box, user_id: str):
             if st.get("est_next"):
                 ui.label(f"下集预判约 {st['est_next']} 分钟（{st.get('est_src', '')}）").classes("text-sm text-gray-500 break-words")
             if st.get("sess_max"):
-                sess_line = f"今日已看 {st.get('sess_used', 0)} 次 / 上限 {st['sess_max']} 次"
+                sess_line = f"今日已完成 {st.get('sess_used', 0)} 次 / 上限 {st['sess_max']} 次"
                 if st.get("resume_at"):
                     sess_line += f"，冷却至 {st['resume_at']}"
                 ui.label(sess_line).classes("text-sm text-gray-500 break-words")
