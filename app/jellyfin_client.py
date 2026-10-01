@@ -148,6 +148,10 @@ class JellyfinClient:
 
     def now_playing(self) -> dict[str, str]:
         """Return {user_id: 'Title'} for active sessions (best effort)."""
+        return {uid: d["title"] for uid, d in self.session_detail().items() if d["title"]}
+
+    def session_detail(self) -> dict[str, dict]:
+        """Return {user_id: {title, series_id, series_name}} (best effort)."""
         try:
             r = self._get("/Sessions")
         except requests.RequestException:
@@ -158,11 +162,69 @@ class JellyfinClient:
             sessions = self._json.decode(r.text)
         except ValueError:
             return {}
-        playing: dict[str, str] = {}
+        detail: dict[str, dict] = {}
         for s in sessions:
             uid = s.get("UserId")
             item = s.get("NowPlayingItem") or {}
-            title = item.get("Name") or item.get("SeriesName") or ""
-            if uid and title:
-                playing[uid] = title
-        return playing
+            if not uid:
+                continue
+            detail[uid] = {
+                "title": item.get("Name") or item.get("SeriesName") or "",
+                "series_id": item.get("SeriesId") or "",
+                "series_name": item.get("SeriesName") or "",
+            }
+        return detail
+
+    @staticmethod
+    def _ticks_to_minutes(ticks) -> int:
+        try:
+            return int(int(ticks) // 600_000_000 // 60)
+        except (TypeError, ValueError):
+            return 0
+
+    def next_episode_minutes(self, user_id: str) -> tuple[int, str]:
+        """Estimate next-episode minutes: real NextUp, else series average.
+
+        Returns (minutes, source) where source is 'next' / 'series_avg' / ''.
+        Random picks can't be known upfront -> caller falls back further
+        (today's average, then configured fallback).
+        """
+        series_id = (self.session_detail().get(user_id) or {}).get("series_id", "")
+        if not series_id:
+            return 0, ""
+        try:
+            r = self._get(f"/Shows/NextUp?userId={user_id}&seriesId={series_id}&limit=1"
+                          "&disableFirstEpisode=false")
+        except requests.RequestException as exc:
+            logger.error("GET NextUp failed: %s", exc)
+            return self.series_average_minutes(user_id, series_id)
+        if r.status_code != 200:
+            return self.series_average_minutes(user_id, series_id)
+        try:
+            items = (self._json.decode(r.text) or {}).get("Items", [])
+        except ValueError:
+            return self.series_average_minutes(user_id, series_id)
+        if items:
+            mins = self._ticks_to_minutes(items[0].get("RunTimeTicks"))
+            if mins > 0:
+                return mins, "next"
+        return self.series_average_minutes(user_id, series_id)
+
+    def series_average_minutes(self, user_id: str, series_id: str) -> tuple[int, str]:
+        try:
+            r = self._get(f"/Users/{user_id}/Items?ParentId={series_id}&Recursive=true"
+                          "&IncludeItemTypes=Episode&Fields=RunTimeTicks&Limit=200")
+        except requests.RequestException as exc:
+            logger.error("GET series episodes failed: %s", exc)
+            return 0, ""
+        if r.status_code != 200:
+            return 0, ""
+        try:
+            items = (self._json.decode(r.text) or {}).get("Items", [])
+        except ValueError:
+            return 0, ""
+        durs = [self._ticks_to_minutes(i.get("RunTimeTicks")) for i in items]
+        durs = [d for d in durs if d > 0]
+        if not durs:
+            return 0, ""
+        return sum(durs) // len(durs), "series_avg"

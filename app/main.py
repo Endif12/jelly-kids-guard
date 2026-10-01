@@ -77,8 +77,10 @@ def user_card(box, user_id: str):
     name = users_cache.get(user_id, user_id)
     st = guard.status.get(user_id, {})
     eps, mins = st.get("eps", 0), st.get("mins", 0)
-    max_eps = st.get("max_eps", 0) or rule["days"][str(settings.weekday())]["max_eps"]
-    max_min = st.get("max_minutes", 0) or rule["days"][str(settings.weekday())]["max_minutes"]
+    day = rule["days"][str(settings.weekday())]
+    max_eps = st.get("max_eps", day["max_eps"])
+    soft_b = st.get("soft_b", day.get("soft_minutes", 0))
+    hard_c = st.get("hard_c", day.get("hard_total", 0))
     locked = st.get("locked", False)
     with box:
         with ui.card().classes("w-full"):
@@ -87,7 +89,10 @@ def user_card(box, user_id: str):
                 ui.badge("已锁定", color="red" if locked else "green").set_text(
                     "已锁定" if locked else "正常")
             ui.label(f"今日：{eps} 集 / {mins} 分钟 ｜ 上限：{fmt_limit(max_eps)} 集 / "
-                     f"{fmt_limit(max_min)} 分钟 ｜ 最低保障：{rule.get('min_minutes', 0)} 分钟")
+                     f"B {fmt_limit(soft_b)} 分钟 / C {fmt_limit(hard_c)} 分钟 ｜ "
+                     f"保障 A：{rule.get('min_minutes', 0)} 分钟")
+            if st.get("est_next"):
+                ui.label(f"下集预判约 {st['est_next']} 分钟（{st.get('est_src', '')}）").classes("text-sm text-gray-500")
             if st.get("reason"):
                 ui.label(st["reason"]).classes("text-sm text-gray-500")
             playing = ""
@@ -146,7 +151,7 @@ def render_dashboard():
 def index():
     global dashboard_box
     ui.label("Jelly Kids Guard｜儿童观影守护").classes("text-2xl font-bold")
-    ui.label("集数 + 时长双上限，最低保障放行，超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500")
+    ui.label("A保障 + B软上限 + C硬上限（下集预判），超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500")
 
     with ui.tabs() as tabs:
         tab_dash = ui.tab("看板")
@@ -183,24 +188,27 @@ def rules_panel():
             ui.label(f"用户：{users_cache.get(uid, uid)}").classes("font-bold")
             ui.checkbox("启用管控", value=rule.get("enabled", True),
                         on_change=lambda e: save_field(uid, "enabled", e.value))
-            ui.number("最低保障分钟（没看够不锁，0=关闭）", value=rule.get("min_minutes", 0), min=0,
+            ui.number("A 最低保障分钟（没看够不锁，0=关闭）", value=rule.get("min_minutes", 0), min=0,
                       step=5, on_change=lambda e: save_field(uid, "min_minutes", int(e.value or 0)))
             lib_options = dict(libs_cache)
             ui.select(lib_options, multiple=True, label="超限后仍保留的媒体库（白名单）",
                       value=[f for f in rule.get("keep_folders", []) if f in lib_options],
                       on_change=lambda e: save_field(uid, "keep_folders", list(e.value or []))).classes("w-full")
-            ui.label("按星期设置每天上限（0 = 不限该项）").classes("font-bold mt-2")
-            with ui.grid(columns=3).classes("gap-2"):
+            ui.label("按星期设置每天上限（0 = 不限该项，需满足 A≤B≤C）").classes("font-bold mt-2")
+            with ui.grid(columns=4).classes("gap-2"):
                 ui.label("星期").classes("font-bold")
                 ui.label("最多集数").classes("font-bold")
-                ui.label("最多分钟").classes("font-bold")
+                ui.label("B 软上限(分)").classes("font-bold")
+                ui.label("C 硬上限(分)").classes("font-bold")
                 for i, wd in enumerate(WEEKDAYS):
                     day = rule["days"][str(i)]
                     ui.label(wd)
                     ui.number(min=0, step=1, value=day["max_eps"],
                               on_change=lambda e, i=i: save_day(uid, i, "max_eps", int(e.value or 0)))
-                    ui.number(min=0, step=5, value=day["max_minutes"],
-                              on_change=lambda e, i=i: save_day(uid, i, "max_minutes", int(e.value or 0)))
+                    ui.number(min=0, step=5, value=day.get("soft_minutes", 0),
+                              on_change=lambda e, i=i: save_day(uid, i, "soft_minutes", int(e.value or 0)))
+                    ui.number(min=0, step=5, value=day.get("hard_total", 0),
+                              on_change=lambda e, i=i: save_day(uid, i, "hard_total", int(e.value or 0)))
             with ui.row().classes("mt-2"):
                 ui.button("保存", color="green", on_click=lambda: (settings.save(), ui.notify("已保存")))
                 ui.button("今日临时 +10 分钟", on_click=lambda: grant_bonus(uid, 0, 10))
@@ -237,12 +245,15 @@ def server_panel():
                         min=0.2, step=0.1)
     scope_in = ui.select(COUNT_SCOPES, label="集数统计口径",
                          value=settings.data.get("count_scope", "episode")).classes("w-full")
+    fallback_in = ui.number("下集预判兜底分钟（拿不到真实/平均时长时用）",
+                            value=settings.data.get("fallback_episode_minutes", 25), min=0, step=5)
 
     def save():
         settings.server["host"] = (host_in.value or "").strip().rstrip("/")
         settings.server["token"] = (token_in.value or "").strip()
         settings.data["polling_minutes"] = float(poll_in.value or 1.0)
         settings.data["count_scope"] = scope_in.value
+        settings.data["fallback_episode_minutes"] = int(fallback_in.value or 0)
         settings.save()
         guard.reconnect()
         ui.notify(refresh_caches())

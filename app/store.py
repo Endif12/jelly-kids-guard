@@ -26,7 +26,8 @@ SCOPE_ITEM_TYPES = {
 
 
 def default_day_rule():
-    return {"max_eps": 2, "max_minutes": 60}
+    # B = soft cap minutes, C = hard total cap minutes (0 = off)
+    return {"max_eps": 2, "soft_minutes": 40, "hard_total": 60}
 
 
 def default_user_rule():
@@ -46,6 +47,7 @@ def default_settings():
         "server": {"host": "", "token": ""},
         "polling_minutes": 1.0,
         "count_scope": "episode",
+        "fallback_episode_minutes": 25,
         "users": {},
     }
 
@@ -60,11 +62,17 @@ def _migrate(settings: dict) -> dict:
         full.update(rule or {})
         days = {}
         for i in range(7):
-            day = {"max_eps": 2, "max_minutes": 60}
-            day.update(((rule or {}).get("days") or {}).get(str(i), {}))
+            old = ((rule or {}).get("days") or {}).get(str(i), {})
+            # Migrate v1 key max_minutes -> soft_minutes (B)
+            day = {"max_eps": 2, "soft_minutes": 40, "hard_total": 60}
+            if "max_minutes" in old and "soft_minutes" not in old:
+                old = dict(old)
+                old["soft_minutes"] = old.pop("max_minutes")
+            day.update(old)
             days[str(i)] = {
                 "max_eps": int(day.get("max_eps", 2) or 0),
-                "max_minutes": int(day.get("max_minutes", 60) or 0),
+                "soft_minutes": int(day.get("soft_minutes", 40) or 0),
+                "hard_total": int(day.get("hard_total", 60) or 0),
             }
         full["days"] = days
         full["min_minutes"] = int(full.get("min_minutes", 0) or 0)
@@ -114,16 +122,19 @@ class SettingsStore:
         return datetime.now().weekday()  # 0 = Monday
 
     def effective_limits(self, user_id: str):
-        """Return (max_eps, max_minutes, min_minutes) for today incl. bonus.
+        """Return (max_eps, soft_B, hard_C, min_A) for today incl. bonus.
 
         Bonus only applies on the day it was granted (bonus_day guard).
-        Non-positive max_* means unlimited.
+        Non-positive max/soft/hard means unlimited/off; A <= 0 disables guarantee.
+        Bonus extends B and C (extra time), never the episode count cap.
         """
         rule = self.get_user(user_id)
         day = rule["days"].get(str(self.weekday()), default_day_rule())
         max_eps = int(day.get("max_eps", 0) or 0)
-        max_minutes = int(day.get("max_minutes", 0) or 0)
+        soft_b = int(day.get("soft_minutes", 0) or 0)
+        hard_c = int(day.get("hard_total", 0) or 0)
         if rule.get("bonus_day") == self.today_key():
+            soft_b += int(rule.get("bonus_minutes", 0) or 0)
+            hard_c += int(rule.get("bonus_minutes", 0) or 0)
             max_eps += int(rule.get("bonus_eps", 0) or 0)
-            max_minutes += int(rule.get("bonus_minutes", 0) or 0)
-        return max_eps, max_minutes, int(rule.get("min_minutes", 0) or 0)
+        return max_eps, soft_b, hard_c, int(rule.get("min_minutes", 0) or 0)

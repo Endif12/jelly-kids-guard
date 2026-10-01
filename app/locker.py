@@ -14,7 +14,7 @@ from datetime import datetime, timedelta
 import yaml
 
 from jellyfin_client import JellyfinClient
-from rules import should_lock
+from rules import boundary_lock, next_gate
 from stats import PlaybackStats
 from store import SettingsStore
 
@@ -85,12 +85,30 @@ class Guard:
                         self.client.set_enabled_folders(uid, backup)
             self.settings.save()
 
+    def estimate_next_minutes(self, user_id: str, eps: int, mins: int) -> tuple[int, str]:
+        """Cascade: real NextUp > series average > today's average > fallback."""
+        try:
+            est, src = self.client.next_episode_minutes(user_id)
+        except Exception:  # noqa: BLE001
+            logger.exception("next-episode lookup failed for %s", user_id)
+            est, src = 0, ""
+        if est > 0:
+            return est, src
+        if eps > 0 and mins > 0:
+            return mins // eps, "today_avg"
+        fallback = int(self.settings.data.get("fallback_episode_minutes", 25) or 0)
+        return (fallback, "fallback") if fallback > 0 else (0, "")
+
     def check_user(self, user_id: str) -> dict:
         """Poll one user, enforce, return status dict for the UI."""
         start, end = self._day_range()
         eps, mins = self.stats.today(user_id, start, end)
-        max_eps, max_minutes, min_minutes = self.settings.effective_limits(user_id)
-        locked, reason = should_lock(eps, mins, max_eps, max_minutes, min_minutes)
+        max_eps, soft_b, hard_c, min_a = self.settings.effective_limits(user_id)
+        locked, reason = boundary_lock(eps, mins, max_eps, soft_b, min_a)
+        est_next, est_src = 0, ""
+        if not locked:
+            est_next, est_src = self.estimate_next_minutes(user_id, eps, mins)
+            locked, reason = next_gate(mins, est_next, hard_c)
         folders = self.client.get_enabled_folders(user_id)
         rule = self.settings.get_user(user_id)
         keep = [f for f in folders if f in (rule.get("keep_folders") or [])]
@@ -112,8 +130,8 @@ class Guard:
 
         st = {
             "eps": eps, "mins": mins,
-            "max_eps": max_eps, "max_minutes": max_minutes,
-            "min_minutes": min_minutes,
+            "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
+            "min_a": min_a, "est_next": est_next, "est_src": est_src,
             "locked": locked, "reason": reason,
             "folders": folders,
         }
