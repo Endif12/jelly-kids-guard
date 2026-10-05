@@ -83,7 +83,7 @@ class Guard:
                 rule["bonus_day"] = ""
                 sess = rule.setdefault("sess", {})
                 sess.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
-                             "open": True, "last_eps": None, "last_mins": None})
+                             "open": True, "last_eps": None, "last_mins": None, "last_secs": None})
                 if rule.get("enabled"):
                     backup = self._recall(uid)
                     if backup:
@@ -117,11 +117,11 @@ class Guard:
         rule = self.settings.get_user(user_id)
         st = rule.setdefault("sess", {"date": "", "used": 0, "since": None,
                                       "cooldown_until": None, "open": True,
-                                      "last_eps": None, "last_mins": None})
+                                      "last_eps": None, "last_mins": None, "last_secs": None})
         today = self.settings.today_key()
         if st.get("date") != today:
             st.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
-                       "open": True, "last_eps": None, "last_mins": None})
+                       "open": True, "last_eps": None, "last_mins": None, "last_secs": None})
         return st
 
     @staticmethod
@@ -201,7 +201,7 @@ class Guard:
         self.clear_bonus(user_id)
         sess = self._sess(user_id)
         sess.update({"used": 0, "since": None, "cooldown_until": None,
-                     "open": True, "last_eps": None, "last_mins": None,
+                     "open": True, "last_eps": None, "last_mins": None, "last_secs": None,
                      "date": self.settings.today_key()})
         self.settings.save()
         return ok, msg
@@ -253,7 +253,9 @@ class Guard:
             cur = [r for r in rows_all if since is None or r[0] >= since]
             st = {
                 "sess_eps": len(cur), "sess_mins": sum(s for _, s in cur) // 60,
+                "sess_secs": sum(s for _, s in cur),
                 "day_eps": day_eps, "day_mins": day_mins,
+                "day_secs": sum(s for _, s in rows_all),
                 "ongoing": bool(playing) and user_id in (playing or {}),
                 "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
                 "min_a": min_a, "est_next": 0, "est_src": "",
@@ -316,6 +318,7 @@ class Guard:
             sess["open"] = False
             sess["last_eps"] = sess_eps
             sess["last_mins"] = sess_mins
+            sess["last_secs"] = sum(s for _, s in cur)
             if gap_h > 0 and used < max_sess:
                 sess["cooldown_until"] = (now + timedelta(hours=gap_h)).isoformat(timespec="seconds")
                 resume_at = now + timedelta(hours=gap_h)
@@ -330,14 +333,19 @@ class Guard:
         folders = self.client.get_enabled_folders(user_id)
         self._apply_folders(user_id, folders, locked, reason if locked else "")
 
-        # 展示：开轮显示实时累计；关轮（名额用完/冷却中）显示冻结数字
+        # 展示：开轮显示实时累计；关轮显示冻结数字；配额用完则本轮即全天。
         if sess.get("open", True) or sess.get("last_eps") is None:
             disp_eps, disp_mins = sess_eps, sess_mins
+            disp_secs = sum(s for _, s in cur)
+        elif max_sess > 0 and used >= max_sess:
+            disp_eps, disp_mins, disp_secs = day_eps, day_mins, sum(s for _, s in rows_all)
         else:
             disp_eps, disp_mins = sess["last_eps"], sess["last_mins"]
+            disp_secs = sess.get("last_secs") or disp_mins * 60
         st = {
-            "sess_eps": disp_eps, "sess_mins": disp_mins,
+            "sess_eps": disp_eps, "sess_mins": disp_mins, "sess_secs": disp_secs,
             "day_eps": day_eps, "day_mins": day_mins,
+            "day_secs": sum(s for _, s in rows_all),
             "ongoing": bool(playing) and user_id in (playing or {}),
             "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
             "min_a": min_a, "est_next": est_next, "est_src": est_src,

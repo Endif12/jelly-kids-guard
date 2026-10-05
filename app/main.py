@@ -11,7 +11,7 @@ import logging
 import os
 import time
 
-from nicegui import app, ui
+from nicegui import app, run, ui
 
 from locker import Guard
 from store import COUNT_SCOPES, WEEKDAYS, SettingsStore
@@ -53,6 +53,13 @@ def refresh_caches() -> str:
 
 def fmt_limit(v: int) -> str:
     return "不限" if v <= 0 else str(v)
+
+
+def fmt_dur(secs) -> str:
+    secs = int(secs or 0)
+    if secs >= 3600:
+        return f"{secs // 3600}时{(secs % 3600) // 60:02d}分"
+    return f"{secs // 60}分{secs % 60:02d}秒"
 
 
 # ----- webhook triggers (for Jellyfin webhooks / manual curl) -----------
@@ -97,7 +104,8 @@ def user_card(box, user_id: str):
                 badge = "播放中" if st.get("ongoing") else ("已锁定" if locked else "正常")
                 ui.badge(badge, color="blue" if st.get("ongoing") and not locked
                          else ("red" if locked else "green")).set_text(badge)
-            ui.label(f"本次：{seps} 集 / {smins} 分钟 ｜ 今日：{deps} 集 / {dmins} 分钟").classes("break-words")
+            ui.label(f"本次：{seps} 集 / {fmt_dur(st.get('sess_secs', smins * 60))} ｜ "
+                     f"今日：{deps} 集 / {fmt_dur(st.get('day_secs', dmins * 60))}").classes("break-words")
             ui.label(f"本次上限：{fmt_limit(max_eps)} 集 / "
                      f"B {fmt_limit(soft_b)} 分钟 / C {fmt_limit(hard_c)} 分钟 ｜ "
                      f"保障 A：{rule.get('min_minutes', 0)} 分钟").classes("break-words")
@@ -224,8 +232,7 @@ def index():
     with ui.tab_panels(tabs, value=tab_dash).classes("w-full"):
         with ui.tab_panel(tab_dash):
             with ui.row():
-                ui.button("刷新状态", on_click=lambda: (guard.check_all(), render_dashboard(),
-                                                       ui.notify("已刷新 " + time.strftime("%H:%M:%S"))))
+                ui.button("刷新状态", on_click=manual_refresh)
                 ui.button("同步用户/媒体库",
                           on_click=lambda: (ui.notify(refresh_caches()), refresh_all_panels()))
             dashboard_box = ui.column().classes("w-full")
@@ -242,13 +249,22 @@ def index():
 _poll_state = {"last": 0.0}
 
 
-def poll_due():
-    """Polling lives inside page timers (NiceGUI forbids global-scope UI)."""
+async def poll_due():
+    """Polling lives inside page timers (NiceGUI forbids global-scope UI).
+
+    检查放后台线程跑，避免 Jellyfin 响应慢时卡死页面导致按钮“点了没反应”。
+    """
     interval = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0)) * 60
     if time.time() - _poll_state["last"] >= interval:
         _poll_state["last"] = time.time()
         if settings.is_configured():
-            guard.check_all()
+            await run.io_bound(guard.check_all)
+
+
+async def manual_refresh():
+    await run.io_bound(guard.check_all)
+    render_dashboard()
+    ui.notify("已刷新 " + time.strftime("%H:%M:%S"))
 
 
 def render_rules():
