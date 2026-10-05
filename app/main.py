@@ -7,6 +7,7 @@ data/settings.json. Drop-downs are fetched live from Jellyfin.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
@@ -183,10 +184,15 @@ def do_reset():
     refresh_all_panels()
 
 
-def do_manual(user_id: str, lock: bool):
-    (guard.manual_lock if lock else guard.manual_unlock)(user_id)
-    guard.check_user(user_id)
-    ui.notify("已锁定" if lock else "已解锁")
+async def do_manual(user_id: str, lock: bool):
+    if lock:
+        ok, msg = await run.io_bound(guard.hard_lock, user_id)
+        ui.notify(msg, color="green" if ok else "orange")
+        await asyncio.sleep(2)  # 等客户端执行停止指令后再重查，徽标一次翻转到位
+    else:
+        await run.io_bound(guard.manual_unlock, user_id)
+        ui.notify("已解锁，新的一轮开始（次数保留）")
+    await run.io_bound(guard.check_user, user_id)
     render_dashboard()
 
 

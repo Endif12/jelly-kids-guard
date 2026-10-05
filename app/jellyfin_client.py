@@ -150,6 +150,50 @@ class JellyfinClient:
         """Return {user_id: 'Title'} for active sessions (best effort)."""
         return {uid: d["title"] for uid, d in self.session_detail().items() if d["title"]}
 
+    def user_sessions(self, user_id: str) -> list[dict]:
+        """Active sessions of one user (best effort)."""
+        try:
+            r = self._get("/Sessions")
+        except requests.RequestException as exc:
+            logger.error("GET /Sessions failed: %s", exc)
+            return []
+        if r.status_code != 200:
+            return []
+        try:
+            sessions = self._json.decode(r.text)
+        except ValueError:
+            return []
+        return [s for s in sessions if s.get("UserId") == user_id and s.get("Id")]
+
+    def stop_playback(self, user_id: str) -> tuple[bool, str]:
+        """Send Stop to every currently-playing session of the user.
+
+        Returns (all_stopped, message). No playing session = success.
+        """
+        targets = [s for s in self.user_sessions(user_id) if s.get("NowPlayingItem")]
+        if not targets:
+            return True, "当前没有在播"
+        fails = []
+        for s in targets:
+            sid = s["Id"]
+            try:
+                r = requests.post(f"{self.host}/Sessions/{sid}/Playing/Stop",
+                                  headers=self.headers, data=json.dumps({}),
+                                  timeout=self.timeout)
+            except requests.RequestException as exc:
+                logger.error("POST Stop %s failed: %s", sid, exc)
+                fails.append(sid)
+                continue
+            if r.status_code not in (200, 204, 404):
+                logger.error("POST Stop %s HTTP %s %s", sid, r.status_code, r.text[:200])
+                fails.append(sid)
+        if fails:
+            return False, f"{len(fails)} 路播放停止失败（客户端可能离线）"
+        names = [ (s.get("NowPlayingItem") or {}).get("Name", "?") for s in targets ]
+        return True, f"已中断 {len(targets)} 路播放（{','.join(names[:2])}）"
+        """Return {user_id: 'Title'} for active sessions (best effort)."""
+        return {uid: d["title"] for uid, d in self.session_detail().items() if d["title"]}
+
     def session_detail(self) -> dict[str, dict]:
         """Return {user_id: {title, series_id, series_name}} (best effort)."""
         try:

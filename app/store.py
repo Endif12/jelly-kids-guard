@@ -38,6 +38,8 @@ def default_user_rule():
         "enabled": True,
         "min_minutes": 0,
         "keep_folders": [],
+        # manual_locked: 看板“立即锁”持久开关（轮询/重启不消失，跨天清零）。
+        "manual_locked": False,
         # 规则外加时（看板手动发放，當天有效）：bonus_eps=多看几集，
         # bonus_min=多看几分钟；_base 为发放时刻的今日累计，用于扣减。
         "bonus_day": "",

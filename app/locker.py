@@ -81,6 +81,7 @@ class Guard:
                 rule["bonus_min"] = 0
                 rule["bonus_min_base"] = None
                 rule["bonus_day"] = ""
+                rule["manual_locked"] = False
                 sess = rule.setdefault("sess", {})
                 sess.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
                              "open": True, "last_eps": None, "last_mins": None, "last_secs": None})
@@ -163,6 +164,7 @@ class Guard:
     def grant_episode(self, user_id: str):
         """规则外多看 1 集（跳过集数/时长/次数/冷却全部规则）。"""
         rule = self.settings.get_user(user_id)
+        rule["manual_locked"] = False  # 显式放行盖过手动锁
         self._ensure_bonus_day(rule)
         if int(rule.get("bonus_eps", 0) or 0) <= 0:
             eps, _ = self.stats.today(user_id, *self._day_range())
@@ -175,6 +177,7 @@ class Guard:
     def grant_minutes(self, user_id: str, minutes: int = 5):
         """规则外多看 N 分钟（跳过全部规则，当前集播完前不掐）。"""
         rule = self.settings.get_user(user_id)
+        rule["manual_locked"] = False  # 显式放行盖过手动锁
         self._ensure_bonus_day(rule)
         if int(rule.get("bonus_min", 0) or 0) <= 0:
             _, mins = self.stats.today(user_id, *self._day_range())
@@ -246,6 +249,28 @@ class Guard:
         gap_h = float(day.get("gap_hours", 0) or 0)
         sess = self._sess(user_id)
         dirty = False
+
+        if self.settings.get_user(user_id).get("manual_locked"):
+            since = self._parse(sess.get("since"))
+            cur = [r for r in rows_all if since is None or r[0] >= since]
+            st = {
+                "sess_eps": len(cur), "sess_mins": sum(s for _, s in cur) // 60,
+                "sess_secs": sum(s for _, s in cur),
+                "day_eps": day_eps, "day_mins": day_mins,
+                "day_secs": sum(s for _, s in rows_all),
+                "ongoing": bool(playing) and user_id in (playing or {}),
+                "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
+                "min_a": min_a, "est_next": 0, "est_src": "",
+                "sess_used": int(sess.get("used", 0) or 0), "sess_max": max_sess,
+                "bonus_eps": 0, "bonus_min": 0,
+                "resume_at": "",
+                "locked": True,
+                "reason": "手动锁定（立即锁），点解锁恢复",
+                "folders": self.client.get_enabled_folders(user_id),
+            }
+            self._apply_folders(user_id, st["folders"], locked=True, reason=st["reason"])
+            self.status[user_id] = st
+            return st
 
         bonus_eps, bonus_min = self.bonus_remaining(user_id, day_eps, day_mins)
         if bonus_eps > 0 or bonus_min > 0:
@@ -384,7 +409,23 @@ class Guard:
 
     def manual_unlock(self, user_id: str):
         self._reset_sitting(user_id)  # 再给一次完整机会，quota 不变
+        rule = self.settings.get_user(user_id)
+        rule["manual_locked"] = False
         self.settings.save()
         backup = self._recall(user_id)
         if backup:
             self.client.set_enabled_folders(user_id, backup)
+
+    def hard_lock(self, user_id: str) -> tuple[bool, str]:
+        """立即锁：中断当前播放 + 持久锁定（轮询/重启不消失，跨天清零）。"""
+        self.clear_bonus(user_id)
+        rule = self.settings.get_user(user_id)
+        rule["manual_locked"] = True
+        self.settings.save()
+        stopped, detail = self.client.stop_playback(user_id)
+        self.manual_lock(user_id)  # 立刻收回媒体库
+        if stopped and "没有在播" in detail:
+            return True, "已锁定（当前没有在播）"
+        if stopped:
+            return True, f"已锁定，{detail}"
+        return False, f"已锁定媒体库，但{detail}——当前集播完后无法再播"
