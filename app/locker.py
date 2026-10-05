@@ -408,7 +408,7 @@ class Guard:
         self.client.set_enabled_folders(user_id, keep)
 
     def manual_unlock(self, user_id: str):
-        self._reset_sitting(user_id)  # 再给一次完整机会，quota 不变
+        """撤销立即锁（点错了当没发生过）：只解开关，不碰轮次/计数/加时。"""
         rule = self.settings.get_user(user_id)
         rule["manual_locked"] = False
         self.settings.save()

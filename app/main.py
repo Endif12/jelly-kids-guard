@@ -139,8 +139,9 @@ def user_card(box, user_id: str):
                 ui.button("+1 集", on_click=lambda: grant_extra(user_id, "eps"))
                 ui.button("撤销加时", on_click=lambda: undo_extra(user_id))
                 ui.button("重置今日", color="orange", on_click=lambda: ask_reset(user_id))
-                ui.button("立即锁", color="red", on_click=lambda: do_manual(user_id, True))
-                ui.button("解锁", color="green", on_click=lambda: do_manual(user_id, False))
+                ui.button("立即锁", color="red", on_click=lambda: do_hardlock(user_id))
+                if "手动锁定" in st.get("reason", ""):
+                    ui.button("撤销立即锁", color="green", on_click=lambda: do_undo_lock(user_id))
 
 
 def grant_extra(user_id: str, kind: str):
@@ -184,15 +185,18 @@ def do_reset():
     refresh_all_panels()
 
 
-async def do_manual(user_id: str, lock: bool):
-    if lock:
-        ok, msg = await run.io_bound(guard.hard_lock, user_id)
-        ui.notify(msg, color="green" if ok else "orange")
-        await asyncio.sleep(2)  # 等客户端执行停止指令后再重查，徽标一次翻转到位
-    else:
-        await run.io_bound(guard.manual_unlock, user_id)
-        ui.notify("已解锁，新的一轮开始（次数保留）")
+async def do_hardlock(user_id: str):
+    ok, msg = await run.io_bound(guard.hard_lock, user_id)
+    ui.notify(msg, color="green" if ok else "orange")
+    await asyncio.sleep(2)  # 等客户端执行停止指令后再重查，徽标一次翻转到位
     await run.io_bound(guard.check_user, user_id)
+    render_dashboard()
+
+
+async def do_undo_lock(user_id: str):
+    await run.io_bound(guard.manual_unlock, user_id)
+    await run.io_bound(guard.check_user, user_id)
+    ui.notify("已撤销立即锁，回到锁定前状态")
     render_dashboard()
 
 
