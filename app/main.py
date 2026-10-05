@@ -224,7 +224,8 @@ def index():
     with ui.tab_panels(tabs, value=tab_dash).classes("w-full"):
         with ui.tab_panel(tab_dash):
             with ui.row():
-                ui.button("刷新状态", on_click=lambda: (guard.check_all(), render_dashboard()))
+                ui.button("刷新状态", on_click=lambda: (guard.check_all(), render_dashboard(),
+                                                       ui.notify("已刷新 " + time.strftime("%H:%M:%S"))))
                 ui.button("同步用户/媒体库",
                           on_click=lambda: (ui.notify(refresh_caches()), refresh_all_panels()))
             dashboard_box = ui.column().classes("w-full")

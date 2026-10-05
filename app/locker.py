@@ -235,7 +235,11 @@ class Guard:
 
         start, end = self._day_range()
         now = datetime.now()
-        day_eps, day_mins = self.stats.today(user_id, start, end)
+        # 单快照：今日和本次都从同一批明细行算，避免两次查询之间
+        # 正在播的记录又涨了几分钟导致两边对不上。
+        rows_all = self.stats.today_rows(user_id, start, end)
+        day_eps = len(rows_all)
+        day_mins = sum(s for _, s in rows_all) // 60
         max_eps, soft_b, hard_c, min_a = self.settings.effective_limits(user_id)
         day = self.settings.today_rule(user_id)
         max_sess = int(day.get("max_sessions", 0) or 0)
@@ -246,8 +250,7 @@ class Guard:
         bonus_eps, bonus_min = self.bonus_remaining(user_id, day_eps, day_mins)
         if bonus_eps > 0 or bonus_min > 0:
             since = self._parse(sess.get("since"))
-            rows = self.stats.today_rows(user_id, start, end)
-            cur = [r for r in rows if since is None or r[0] >= since]
+            cur = [r for r in rows_all if since is None or r[0] >= since]
             st = {
                 "sess_eps": len(cur), "sess_mins": sum(s for _, s in cur) // 60,
                 "day_eps": day_eps, "day_mins": day_mins,
@@ -275,9 +278,8 @@ class Guard:
 
         open_round = bool(sess.get("open", True))
         since = self._parse(sess.get("since"))
-        rows = self.stats.today_rows(user_id, start, end)
         if open_round:
-            cur = [r for r in rows if since is None or r[0] >= since]
+            cur = [r for r in rows_all if since is None or r[0] >= since]
         else:
             cur = []  # 轮已结束：锁后还播的尾巴不计入任何一轮
         sess_eps = len(cur)
