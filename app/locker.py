@@ -287,6 +287,7 @@ class Guard:
                 "sess_used": int(sess.get("used", 0) or 0), "sess_max": max_sess,
                 "bonus_eps": bonus_eps, "bonus_min": bonus_min,
                 "resume_at": "",
+                "checked_at": now.strftime("%H:%M:%S"),
                 "locked": False,
                 "reason": ("规则外加时中（" + " / ".join(
                     ([f"剩 {bonus_eps} 集"] if bonus_eps else []) +
@@ -375,8 +376,9 @@ class Guard:
             "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
             "min_a": min_a, "est_next": est_next, "est_src": est_src,
             "sess_used": used, "sess_max": max_sess,
-            "bonus_eps": bonus_eps, "bonus_min": bonus_min,
+            "bonus_eps": 0, "bonus_min": 0,
             "resume_at": resume_at.strftime("%H:%M") if resume_at else "",
+            "checked_at": now.strftime("%H:%M:%S"),
             "locked": locked, "reason": reason,
             "folders": folders,
         }

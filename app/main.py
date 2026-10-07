@@ -134,6 +134,8 @@ def user_card(box, user_id: str):
                 pass
             if playing:
                 ui.label(f"正在播放：{playing}").classes("text-sm break-words")
+            if st.get("checked_at"):
+                ui.label(f"数据截至 {st['checked_at']}").classes("text-xs text-gray-400 break-words")
             with ui.row().classes("flex-wrap"):
                 ui.button("+5 分钟", on_click=lambda: grant_extra(user_id, "min"))
                 ui.button("+1 集", on_click=lambda: grant_extra(user_id, "eps"))
@@ -144,20 +146,32 @@ def user_card(box, user_id: str):
                     ui.button("撤销立即锁", color="green", on_click=lambda: do_undo_lock(user_id))
 
 
-def grant_extra(user_id: str, kind: str):
+_refresh_lock = asyncio.Lock()
+
+
+async def _locked_check_all() -> bool:
+    """串行跑全量检查：已在跑就跳过，避免连点导致两次交错、数据对不上。"""
+    if _refresh_lock.locked():
+        return False
+    async with _refresh_lock:
+        await run.io_bound(guard.check_all)
+    return True
+
+
+async def grant_extra(user_id: str, kind: str):
     if kind == "min":
-        guard.grant_minutes(user_id, 5)
+        await run.io_bound(guard.grant_minutes, user_id, 5)
         ui.notify("已加 5 分钟（规则外，播完当前集前不锁）")
     else:
-        guard.grant_episode(user_id)
+        await run.io_bound(guard.grant_episode, user_id)
         ui.notify("已加 1 集（规则外，下集可播）")
-    guard.check_user(user_id)
+    await run.io_bound(guard.check_user, user_id)
     refresh_all_panels()
 
 
-def undo_extra(user_id: str):
-    guard.clear_bonus(user_id)
-    guard.check_user(user_id)
+async def undo_extra(user_id: str):
+    await run.io_bound(guard.clear_bonus, user_id)
+    await run.io_bound(guard.check_user, user_id)
     ui.notify("已撤销加时，规则恢复")
     refresh_all_panels()
 
@@ -173,14 +187,14 @@ def ask_reset(user_id: str):
         ui.notify("确认框未就绪，请刷新页面")
 
 
-def do_reset():
+async def do_reset():
     uid = reset_box["uid"]
     if reset_box["dlg"] is not None:
         reset_box["dlg"].close()
     if not uid:
         return
-    ok, msg = guard.reset_today(uid)
-    guard.check_user(uid)
+    ok, msg = await run.io_bound(guard.reset_today, uid)
+    await run.io_bound(guard.check_user, uid)
     ui.notify(msg, color="green" if ok else "red")
     refresh_all_panels()
 
@@ -243,8 +257,7 @@ def index():
         with ui.tab_panel(tab_dash):
             with ui.row():
                 ui.button("刷新状态", on_click=manual_refresh)
-                ui.button("同步用户/媒体库",
-                          on_click=lambda: (ui.notify(refresh_caches()), refresh_all_panels()))
+                ui.button("同步用户/媒体库", on_click=sync_all)
             dashboard_box = ui.column().classes("w-full")
             render_dashboard()
         with ui.tab_panel(tab_rules):
@@ -254,6 +267,7 @@ def index():
             server_panel()
 
     ui.timer(15.0, poll_due)
+    ui.timer(1.0, bootstrap, once=True)
 
 
 _poll_state = {"last": 0.0}
@@ -263,26 +277,43 @@ async def poll_due():
     """Polling lives inside page timers (NiceGUI forbids global-scope UI).
 
     检查放后台线程跑，避免 Jellyfin 响应慢时卡死页面导致按钮“点了没反应”。
+    跑完顺手重绘看板，打开页面后数字会自动跟上来。
     """
     interval = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0)) * 60
     if time.time() - _poll_state["last"] >= interval:
         _poll_state["last"] = time.time()
-        if settings.is_configured():
-            await run.io_bound(guard.check_all)
+        if settings.is_configured() and await _locked_check_all():
+            render_dashboard()
 
 
 async def manual_refresh():
-    await run.io_bound(guard.check_all)
+    if await _locked_check_all():
+        render_dashboard()
+        ui.notify("已刷新 " + time.strftime("%H:%M:%S"))
+    else:
+        ui.notify("正在刷新，稍等…")
+
+
+async def sync_all():
+    msg = await run.io_bound(refresh_caches)
+    ui.notify(msg)
+    refresh_all_panels()
+
+
+async def bootstrap():
+    """打开页面 1 秒后跑一次：数据+名单都拉齐再画，避免首屏旧数。"""
+    if not settings.is_configured():
+        return
+    if await _locked_check_all() and not users_cache:
+        await run.io_bound(refresh_caches)
     render_dashboard()
-    ui.notify("已刷新 " + time.strftime("%H:%M:%S"))
+    render_rules()
 
 
 def render_rules():
     if rules_box is None:
         return
     rules_box.clear()
-    if not users_cache and settings.is_configured():
-        refresh_caches()
     options = dict(users_cache) or {uid: uid for uid in settings.data.get("users", {})}
     if not options:
         with rules_box:
@@ -369,7 +400,7 @@ def server_panel():
                             value=settings.data.get("fallback_episode_minutes", 25), min=0, step=5)
     ui.label("拿不到真实下集/平均时长时使用").classes("text-xs text-gray-500 break-words")
 
-    def save():
+    async def save():
         settings.server["host"] = (host_in.value or "").strip().rstrip("/")
         settings.server["token"] = (token_in.value or "").strip()
         settings.data["polling_minutes"] = float(poll_in.value or 1.0)
@@ -377,15 +408,15 @@ def server_panel():
         settings.data["fallback_episode_minutes"] = int(fallback_in.value or 0)
         settings.save()
         guard.reconnect()
-        ui.notify(refresh_caches())
+        ui.notify(await run.io_bound(refresh_caches))
         refresh_all_panels()
 
-    def test():
+    async def test():
         guard.reconnect()
-        ok, msg = guard.client.check_connection()
+        ok, msg = await run.io_bound(guard.client.check_connection)
         ui.notify(msg, color="green" if ok else "red")
         if ok:
-            ok2, msg2 = guard.client.check_playback_reporting()
+            ok2, msg2 = await run.io_bound(guard.client.check_playback_reporting)
             ui.notify(msg2, color="green" if ok2 else "red")
 
     with ui.row():
