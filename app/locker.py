@@ -198,10 +198,12 @@ class Guard:
         self.settings.save()
 
     def reset_today(self, user_id: str) -> tuple[bool, str]:
-        """清零今日播放记录（测试用，不可恢复），同时撤销加时、重置轮次."""
+        """清零今日播放记录（测试用，不可恢复），同时撤销加时/手动锁、重置轮次."""
         start, end = self._day_range()
         ok, msg = self.stats.reset_day(user_id, start, end)
         self.clear_bonus(user_id)
+        rule = self.settings.get_user(user_id)
+        rule["manual_locked"] = False
         sess = self._sess(user_id)
         sess.update({"used": 0, "since": None, "cooldown_until": None,
                      "open": True, "last_eps": None, "last_mins": None, "last_secs": None,
@@ -264,8 +266,10 @@ class Guard:
                 "sess_used": int(sess.get("used", 0) or 0), "sess_max": max_sess,
                 "bonus_eps": 0, "bonus_min": 0,
                 "resume_at": "",
+                "checked_at": now.strftime("%H:%M:%S"),
+                "playing_title": (playing or {}).get(user_id, ""),
                 "locked": True,
-                "reason": "手动锁定（立即锁），点解锁恢复",
+                "reason": "手动锁定（立即锁），点撤销立即锁恢复",
                 "folders": self.client.get_enabled_folders(user_id),
             }
             self._apply_folders(user_id, st["folders"], locked=True, reason=st["reason"])
@@ -288,6 +292,7 @@ class Guard:
                 "bonus_eps": bonus_eps, "bonus_min": bonus_min,
                 "resume_at": "",
                 "checked_at": now.strftime("%H:%M:%S"),
+                "playing_title": (playing or {}).get(user_id, ""),
                 "locked": False,
                 "reason": ("规则外加时中（" + " / ".join(
                     ([f"剩 {bonus_eps} 集"] if bonus_eps else []) +
@@ -379,6 +384,7 @@ class Guard:
             "bonus_eps": 0, "bonus_min": 0,
             "resume_at": resume_at.strftime("%H:%M") if resume_at else "",
             "checked_at": now.strftime("%H:%M:%S"),
+            "playing_title": (playing or {}).get(user_id, ""),
             "locked": locked, "reason": reason,
             "folders": folders,
         }

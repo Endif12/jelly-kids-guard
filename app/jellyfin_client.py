@@ -191,8 +191,6 @@ class JellyfinClient:
             return False, f"{len(fails)} 路播放停止失败（客户端可能离线）"
         names = [ (s.get("NowPlayingItem") or {}).get("Name", "?") for s in targets ]
         return True, f"已中断 {len(targets)} 路播放（{','.join(names[:2])}）"
-        """Return {user_id: 'Title'} for active sessions (best effort)."""
-        return {uid: d["title"] for uid, d in self.session_detail().items() if d["title"]}
 
     def session_detail(self) -> dict[str, dict]:
         """Return {user_id: {title, series_id, series_name}} (best effort)."""

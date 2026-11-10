@@ -28,8 +28,14 @@ guard = Guard(settings)
 
 users_cache: dict[str, str] = {}
 libs_cache: dict[str, str] = {}
-dashboard_box = None
-rules_box = None
+# 每个浏览器连接自己的容器（按 client id），避免多标签页互相覆盖：
+# 全局单容器时，后开的页会抢走重绘目标，先开的页永远不更新。
+panels: dict[str, dict] = {}
+
+
+def current_panels() -> dict:
+    cid = ui.context.client.id
+    return panels.get(cid, {})
 
 
 def refresh_all_panels():
@@ -127,13 +133,8 @@ def user_card(box, user_id: str):
                     bparts.append(f"剩约 {st['bonus_min']} 分钟")
                 ui.label("规则外加时（" + " / ".join(bparts) + "）"
                          ).classes("text-sm text-blue-600 break-words")
-            playing = ""
-            try:
-                playing = (guard.client.now_playing() or {}).get(user_id, "")
-            except Exception:  # noqa: BLE001
-                pass
-            if playing:
-                ui.label(f"正在播放：{playing}").classes("text-sm break-words")
+            if st.get("playing_title"):
+                ui.label(f"正在播放：{st['playing_title']}").classes("text-sm break-words")
             if st.get("checked_at"):
                 ui.label(f"数据截至 {st['checked_at']}").classes("text-xs text-gray-400 break-words")
             with ui.row().classes("flex-wrap"):
@@ -150,11 +151,15 @@ _refresh_lock = asyncio.Lock()
 
 
 async def _locked_check_all() -> bool:
-    """串行跑全量检查：已在跑就跳过，避免连点导致两次交错、数据对不上。"""
+    """串行跑全量检查：已在跑就跳过，避免连点导致两次交错、数据对不上。
+
+    真正跑完才推进节拍器，手动刷新后不会再被定时器立刻重复一遍。
+    """
     if _refresh_lock.locked():
         return False
     async with _refresh_lock:
         await run.io_bound(guard.check_all)
+    _poll_state["last"] = time.time()
     return True
 
 
@@ -219,25 +224,25 @@ def note(text: str):
 
 
 def render_dashboard():
-    if dashboard_box is None:
+    box = current_panels().get("dash")
+    if box is None:
         return
-    dashboard_box.clear()
+    box.clear()
     if not settings.is_configured():
-        with dashboard_box:
+        with box:
             note("还没有配置 Jellyfin 服务器，请先到「服务器」页填写地址和 API Key，点保存后再点「同步用户/媒体库」。")
         return
     for uid, rule in settings.data.get("users", {}).items():
         if rule.get("enabled"):
-            user_card(dashboard_box, uid)
+            user_card(box, uid)
     if not any(r.get("enabled") for r in settings.data.get("users", {}).values()):
-        with dashboard_box:
+        with box:
             note("还没有启用任何受控用户，去「规则设置」页添加。")
 
 
 # ----- pages -----------------------------------------------------------
 @ui.page("/", title="Jelly Kids Guard")
 def index():
-    global dashboard_box, rules_box
     ui.label("Jelly Kids Guard｜儿童观影守护").classes("text-2xl font-bold break-words")
     ui.label("A保障 + B软上限 + C硬上限（下集预判），超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500 break-words")
 
@@ -249,6 +254,12 @@ def index():
             ui.button("取消", on_click=dlg.close)
     reset_box["dlg"] = dlg
 
+    dash_box = ui.column().classes("w-full")
+    rules_panel_box = ui.column().classes("w-full")
+    cid = ui.context.client.id
+    panels[cid] = {"dash": dash_box, "rules": rules_panel_box}
+    ui.context.client.on_disconnect(lambda c_id=cid: panels.pop(c_id, None))
+
     with ui.tabs() as tabs:
         tab_dash = ui.tab("看板")
         tab_rules = ui.tab("规则设置")
@@ -258,10 +269,8 @@ def index():
             with ui.row():
                 ui.button("刷新状态", on_click=manual_refresh)
                 ui.button("同步用户/媒体库", on_click=sync_all)
-            dashboard_box = ui.column().classes("w-full")
             render_dashboard()
         with ui.tab_panel(tab_rules):
-            rules_box = ui.column().classes("w-full")
             render_rules()
         with ui.tab_panel(tab_server):
             server_panel()
@@ -280,10 +289,10 @@ async def poll_due():
     跑完顺手重绘看板，打开页面后数字会自动跟上来。
     """
     interval = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0)) * 60
-    if time.time() - _poll_state["last"] >= interval:
-        _poll_state["last"] = time.time()
-        if settings.is_configured() and await _locked_check_all():
-            render_dashboard()
+    if time.time() - _poll_state["last"] < interval:
+        return
+    if settings.is_configured() and await _locked_check_all():
+        render_dashboard()
 
 
 async def manual_refresh():
@@ -304,23 +313,25 @@ async def bootstrap():
     """打开页面 1 秒后跑一次：数据+名单都拉齐再画，避免首屏旧数。"""
     if not settings.is_configured():
         return
-    if await _locked_check_all() and not users_cache:
+    await _locked_check_all()
+    if not users_cache:
         await run.io_bound(refresh_caches)
     render_dashboard()
     render_rules()
 
 
 def render_rules():
-    if rules_box is None:
+    box = current_panels().get("rules")
+    if box is None:
         return
-    rules_box.clear()
+    box.clear()
     options = dict(users_cache) or {uid: uid for uid in settings.data.get("users", {})}
     if not options:
-        with rules_box:
+        with box:
             note(f"还没有用户数据（当前缓存：用户 {len(users_cache)} 个，媒体库 {len(libs_cache)} 个）："
                  "请先到「服务器」页保存并同步；若同步后仍是 0 个，请看容器日志里的 GET /Users 报错。")
         return
-    with rules_box:
+    with box:
         rules_editor(options)
 
 
