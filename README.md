@@ -75,3 +75,4 @@ python app/main.py
 ## 数据
 
 全部存在挂载目录：`settings.json`（可视化配置）、`folders.bck`（锁之前的媒体库备份，用于恢复）。
+ 
