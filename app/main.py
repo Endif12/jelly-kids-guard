@@ -278,12 +278,6 @@ def index():
             ui.button("取消", on_click=dlg.close)
     reset_box["dlg"] = dlg
 
-    dash_box = ui.column().classes("w-full")
-    rules_panel_box = ui.column().classes("w-full")
-    cid = ui.context.client.id
-    panels[cid] = {"dash": dash_box, "rules": rules_panel_box}
-    ui.context.client.on_disconnect(lambda c_id=cid: panels.pop(c_id, None))
-
     with ui.tabs() as tabs:
         tab_dash = ui.tab("看板")
         tab_rules = ui.tab("规则设置")
@@ -293,11 +287,17 @@ def index():
             with ui.row():
                 ui.button("刷新状态", on_click=manual_refresh)
                 ui.button("同步用户/媒体库", on_click=sync_all)
-            render_dashboard()
+            dash_box = ui.column().classes("w-full")
         with ui.tab_panel(tab_rules):
-            render_rules()
+            rules_box = ui.column().classes("w-full")
         with ui.tab_panel(tab_server):
             server_panel()
+
+    cid = ui.context.client.id
+    panels[cid] = {"dash": dash_box, "rules": rules_box}
+    ui.context.client.on_disconnect(lambda c_id=cid: panels.pop(c_id, None))
+    render_dashboard()
+    render_rules()
 
     ui.timer(15.0, poll_due)
     ui.timer(1.0, bootstrap, once=True)
