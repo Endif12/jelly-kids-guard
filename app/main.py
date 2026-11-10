@@ -157,14 +157,6 @@ def user_card(box, user_id: str):
                 ui.label(f"正在播放：{st['playing_title']}").classes("text-sm break-words")
             if st.get("checked_at"):
                 ui.label(f"数据截至 {st['checked_at']}").classes("text-xs text-gray-400 break-words")
-            eps = st.get("episodes") or []
-            if eps:
-                ui.label("本集明细（播放时长 / 总时长）").classes(
-                    "text-xs text-gray-500 mt-1 break-words")
-                for e in eps[-50:]:
-                    total = fmt_dur(e["total"]) if e.get("total") else "未知"
-                    ui.label(f"{e['series']}：{fmt_dur(e.get('played', 0))} / {total}"
-                             ).classes("text-sm break-words")
             with ui.row().classes("flex-wrap"):
                 ui.button("+5 分钟", on_click=lambda: grant_extra(user_id, "min"))
                 ui.button("+1 集", on_click=lambda: grant_extra(user_id, "eps"))
@@ -173,6 +165,14 @@ def user_card(box, user_id: str):
                 ui.button("立即锁", color="red", on_click=lambda: do_hardlock(user_id))
                 if "手动锁定" in st.get("reason", ""):
                     ui.button("撤销立即锁", color="green", on_click=lambda: do_undo_lock(user_id))
+        eps = st.get("episodes") or []
+        if eps:
+            ui.label("明细时长（播放时长 / 总时长）").classes(
+                "text-xs text-gray-500 mt-2 break-words")
+            for e in eps[-50:]:
+                total = fmt_dur(e["total"]) if e.get("total") else "未知"
+                ui.label(f"{e['series']}：{fmt_dur(e.get('played', 0))} / {total}"
+                         ).classes("text-sm break-words")
 
 
 _refresh_lock = asyncio.Lock()
