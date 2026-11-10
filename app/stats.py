@@ -101,3 +101,23 @@ class PlaybackStats:
                 continue
             rows.append((start, secs))
         return rows
+
+    def today_records(self, user_id: str, date_start: str, date_end: str,
+                      limit: int = 500) -> list[dict]:
+        """Return [{ts, item_id, name, secs}] detail records (chronological)."""
+        sql = ("SELECT DateCreated, ItemId, ItemName, PlayDuration FROM PlaybackActivity "
+               f"WHERE {self._where(user_id, date_start, date_end)} "
+               f"ORDER BY DateCreated LIMIT {limit}")
+        data = self._query(sql)
+        if not isinstance(data, dict):
+            return []
+        records: list[dict] = []
+        for item in data.get("results", []):
+            try:
+                ts = datetime.strptime(str(item[0])[:19], ROW_FORMAT)
+                secs = int(float(item[3] or 0))
+            except (ValueError, TypeError, IndexError):
+                continue
+            records.append({"ts": ts, "item_id": str(item[1] or ""),
+                            "name": str(item[2] or ""), "secs": secs})
+        return records

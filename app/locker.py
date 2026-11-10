@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
+import time
 from datetime import datetime, timedelta
 
 import yaml
@@ -20,6 +22,8 @@ from store import SettingsStore
 
 logger = logging.getLogger("kids-guard")
 
+ITEM_TTL = 600  # 秒：条目元数据（剧名/总时长）缓存时长
+
 
 class Guard:
     def __init__(self, settings: SettingsStore):
@@ -29,6 +33,10 @@ class Guard:
         self.backup_path = os.path.join(os.environ.get("DATA_DIR", "data"), "folders.bck")
         self.last_day = settings.today_key()
         self.status: dict[str, dict] = {}
+        # 后台线程与网页按钮并发访问 Guard，用可重入锁保证
+        # 轮次/次数/加时等状态不被双计数。
+        self._lock = threading.RLock()
+        self._item_cache: dict[str, tuple[float, dict]] = {}
         self.reconnect()
 
     # ----- wiring -----------------------------------------------------
@@ -71,25 +79,28 @@ class Guard:
         return now.strftime("%Y-%m-%d"), (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
     def _maybe_new_day(self):
-        today = self.settings.today_key()
-        if today != self.last_day:
-            logger.info("new day %s: reset bonus/sitting + restore folders", today)
-            self.last_day = today
-            for uid, rule in self.settings.data.get("users", {}).items():
-                rule["bonus_eps"] = 0
-                rule["bonus_eps_base"] = None
-                rule["bonus_min"] = 0
-                rule["bonus_min_base"] = None
-                rule["bonus_day"] = ""
-                rule["manual_locked"] = False
-                sess = rule.setdefault("sess", {})
-                sess.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
-                             "open": True, "last_eps": None, "last_mins": None, "last_secs": None})
-                if rule.get("enabled"):
-                    backup = self._recall(uid)
-                    if backup:
-                        self.client.set_enabled_folders(uid, backup)
-            self.settings.save()
+        with self._lock:
+            today = self.settings.today_key()
+            if today != self.last_day:
+                logger.info("new day %s: reset bonus/sitting + restore folders", today)
+                self.last_day = today
+                for uid, rule in self.settings.data.get("users", {}).items():
+                    rule["bonus_eps"] = 0
+                    rule["bonus_eps_base"] = None
+                    rule["bonus_min"] = 0
+                    rule["bonus_min_base"] = None
+                    rule["bonus_day"] = ""
+                    rule["manual_locked"] = False
+                    sess = rule.setdefault("sess", {})
+                    sess.update({"date": today, "used": 0, "since": None,
+                                 "cooldown_until": None, "open": True,
+                                 "last_eps": None, "last_mins": None,
+                                 "last_secs": None, "last_since": None})
+                    if rule.get("enabled"):
+                        backup = self._recall(uid)
+                        if backup:
+                            self.client.set_enabled_folders(uid, backup)
+                self.settings.save()
 
     def estimate_next_minutes(self, user_id: str, eps: int, mins: int) -> tuple[int, str]:
         """Cascade: real NextUp > series average > today's average > fallback."""
@@ -118,11 +129,13 @@ class Guard:
         rule = self.settings.get_user(user_id)
         st = rule.setdefault("sess", {"date": "", "used": 0, "since": None,
                                       "cooldown_until": None, "open": True,
-                                      "last_eps": None, "last_mins": None, "last_secs": None})
+                                      "last_eps": None, "last_mins": None,
+                                      "last_secs": None, "last_since": None})
         today = self.settings.today_key()
         if st.get("date") != today:
             st.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
-                       "open": True, "last_eps": None, "last_mins": None, "last_secs": None})
+                       "open": True, "last_eps": None, "last_mins": None,
+                       "last_secs": None, "last_since": None})
         return st
 
     @staticmethod
@@ -163,53 +176,58 @@ class Guard:
 
     def grant_episode(self, user_id: str):
         """规则外多看 1 集（跳过集数/时长/次数/冷却全部规则）。"""
-        rule = self.settings.get_user(user_id)
-        rule["manual_locked"] = False  # 显式放行盖过手动锁
-        self._ensure_bonus_day(rule)
-        if int(rule.get("bonus_eps", 0) or 0) <= 0:
-            eps, _ = self.stats.today(user_id, *self._day_range())
-            rule["bonus_eps_base"] = eps
-        rule["bonus_eps"] = int(rule.get("bonus_eps", 0) or 0) + 1
-        if self.status.get(user_id, {}).get("locked"):
-            self._reset_sitting(user_id)  # 上一轮已结束，加时开启新的一轮
-        self.settings.save()
+        with self._lock:
+            rule = self.settings.get_user(user_id)
+            rule["manual_locked"] = False  # 显式放行盖过手动锁
+            self._ensure_bonus_day(rule)
+            if int(rule.get("bonus_eps", 0) or 0) <= 0:
+                eps, _ = self.stats.today(user_id, *self._day_range())
+                rule["bonus_eps_base"] = eps
+            rule["bonus_eps"] = int(rule.get("bonus_eps", 0) or 0) + 1
+            if self.status.get(user_id, {}).get("locked"):
+                self._reset_sitting(user_id)  # 上一轮已结束，加时开启新的一轮
+            self.settings.save()
 
     def grant_minutes(self, user_id: str, minutes: int = 5):
         """规则外多看 N 分钟（跳过全部规则，当前集播完前不掐）。"""
-        rule = self.settings.get_user(user_id)
-        rule["manual_locked"] = False  # 显式放行盖过手动锁
-        self._ensure_bonus_day(rule)
-        if int(rule.get("bonus_min", 0) or 0) <= 0:
-            _, mins = self.stats.today(user_id, *self._day_range())
-            rule["bonus_min_base"] = mins
-        rule["bonus_min"] = int(rule.get("bonus_min", 0) or 0) + minutes
-        if self.status.get(user_id, {}).get("locked"):
-            self._reset_sitting(user_id)  # 上一轮已结束，加时开启新的一轮
-        self.settings.save()
+        with self._lock:
+            rule = self.settings.get_user(user_id)
+            rule["manual_locked"] = False  # 显式放行盖过手动锁
+            self._ensure_bonus_day(rule)
+            if int(rule.get("bonus_min", 0) or 0) <= 0:
+                _, mins = self.stats.today(user_id, *self._day_range())
+                rule["bonus_min_base"] = mins
+            rule["bonus_min"] = int(rule.get("bonus_min", 0) or 0) + minutes
+            if self.status.get(user_id, {}).get("locked"):
+                self._reset_sitting(user_id)  # 上一轮已结束，加时开启新的一轮
+            self.settings.save()
 
     def clear_bonus(self, user_id: str):
         """撤销加时（按错了用这个），规则立即恢复。"""
-        rule = self.settings.get_user(user_id)
-        rule["bonus_eps"] = 0
-        rule["bonus_eps_base"] = None
-        rule["bonus_min"] = 0
-        rule["bonus_min_base"] = None
-        rule["bonus_day"] = ""
-        self.settings.save()
+        with self._lock:
+            rule = self.settings.get_user(user_id)
+            rule["bonus_eps"] = 0
+            rule["bonus_eps_base"] = None
+            rule["bonus_min"] = 0
+            rule["bonus_min_base"] = None
+            rule["bonus_day"] = ""
+            self.settings.save()
 
     def reset_today(self, user_id: str) -> tuple[bool, str]:
         """清零今日播放记录（测试用，不可恢复），同时撤销加时/手动锁、重置轮次."""
-        start, end = self._day_range()
-        ok, msg = self.stats.reset_day(user_id, start, end)
-        self.clear_bonus(user_id)
-        rule = self.settings.get_user(user_id)
-        rule["manual_locked"] = False
-        sess = self._sess(user_id)
-        sess.update({"used": 0, "since": None, "cooldown_until": None,
-                     "open": True, "last_eps": None, "last_mins": None, "last_secs": None,
-                     "date": self.settings.today_key()})
-        self.settings.save()
-        return ok, msg
+        with self._lock:
+            start, end = self._day_range()
+            ok, msg = self.stats.reset_day(user_id, start, end)
+            self.clear_bonus(user_id)
+            rule = self.settings.get_user(user_id)
+            rule["manual_locked"] = False
+            sess = self._sess(user_id)
+            sess.update({"used": 0, "since": None, "cooldown_until": None,
+                         "open": True, "last_eps": None, "last_mins": None,
+                         "last_secs": None, "last_since": None,
+                         "date": self.settings.today_key()})
+            self.settings.save()
+            return ok, msg
 
     def _apply_folders(self, user_id: str, folders: list, locked: bool, reason: str = ""):
         rule = self.settings.get_user(user_id)
@@ -236,13 +254,68 @@ class Guard:
         the day only carries quota + cooldown. playing optionally
         carries one shared /Sessions snapshot for all users.
         """
+        with self._lock:
+            return self._check_user_locked(user_id, playing)
+
+    def _item_meta(self, user_id: str, item_ids: list[str]) -> dict[str, dict]:
+        """Item metadata with TTL cache; batch lookup, never raises."""
+        now_ts = time.time()
+        need = [iid for iid in dict.fromkeys(item_ids) if iid
+                and (iid not in self._item_cache
+                     or now_ts - self._item_cache[iid][0] > ITEM_TTL)]
+        if need:
+            try:
+                infos = self.client.items_info(user_id, need)
+            except Exception:  # noqa: BLE001
+                logger.exception("items_info failed")
+                infos = {}
+            for iid, info in infos.items():
+                self._item_cache[iid] = (now_ts, info)
+        out = {}
+        for iid in item_ids:
+            cached = self._item_cache.get(iid)
+            if cached:
+                out[iid] = cached[1]
+        return out
+
+    def _episode_window(self, sess: dict, max_sess: int,
+                        used: int, records: list[dict]) -> list[dict]:
+        """挑出与看板“本次”口径一致的那批记录（按转换后的最终状态选窗）."""
+        open_now = bool(sess.get("open", True))
+        since = self._parse(sess.get("since"))
+        if open_now:
+            return [r for r in records if since is None or r["ts"] >= since]
+        if max_sess > 0 and used >= max_sess:
+            return list(records)  # 配额用完：本次=今日
+        # 冷却中：显示刚结束那一轮 [last_since, since)
+        last_since = self._parse(sess.get("last_since"))
+        sel = [r for r in records
+               if (last_since is None or r["ts"] >= last_since)
+               and (since is not None and r["ts"] < since)]
+        return sel or list(records)
+
+    def _build_episodes(self, user_id: str, records: list[dict]) -> list[dict]:
+        """把记录转成看板明细行：剧名（海报页标题）+ 播放时长/总时长."""
+        if not records:
+            return []
+        meta = self._item_meta(user_id, [r["item_id"] for r in records])
+        episodes = []
+        for r in records:
+            m = meta.get(r["item_id"], {})
+            series = m.get("series") or r.get("name") or "未知节目"
+            episodes.append({"series": series, "played": r["secs"],
+                             "total": int(m.get("total_secs") or 0)})
+        return episodes
+
+    def _check_user_locked(self, user_id: str, playing: dict | None = None) -> dict:
         from datetime import datetime, timedelta
 
         start, end = self._day_range()
         now = datetime.now()
         # 单快照：今日和本次都从同一批明细行算，避免两次查询之间
         # 正在播的记录又涨了几分钟导致两边对不上。
-        rows_all = self.stats.today_rows(user_id, start, end)
+        records = self.stats.today_records(user_id, start, end)
+        rows_all = [(r["ts"], r["secs"]) for r in records]
         day_eps = len(rows_all)
         day_mins = sum(s for _, s in rows_all) // 60
         max_eps, soft_b, hard_c, min_a = self.settings.effective_limits(user_id)
@@ -272,6 +345,9 @@ class Guard:
                 "reason": "手动锁定（立即锁），点撤销立即锁恢复",
                 "folders": self.client.get_enabled_folders(user_id),
             }
+            since_d = self._parse(sess.get("since"))
+            cur_m = [r for r in records if since_d is None or r["ts"] >= since_d]
+            st["episodes"] = self._build_episodes(user_id, cur_m)
             self._apply_folders(user_id, st["folders"], locked=True, reason=st["reason"])
             self.status[user_id] = st
             return st
@@ -280,6 +356,7 @@ class Guard:
         if bonus_eps > 0 or bonus_min > 0:
             since = self._parse(sess.get("since"))
             cur = [r for r in rows_all if since is None or r[0] >= since]
+            cur_recs = [r for r in records if since is None or r["ts"] >= since]
             st = {
                 "sess_eps": len(cur), "sess_mins": sum(s for _, s in cur) // 60,
                 "sess_secs": sum(s for _, s in cur),
@@ -299,6 +376,7 @@ class Guard:
                     ([f"剩约 {bonus_min} 分钟"] if bonus_min else [])) + "），本次播完前不锁"),
                 "folders": self.client.get_enabled_folders(user_id),
             }
+            st["episodes"] = self._build_episodes(user_id, cur_recs)
             self._apply_folders(user_id, st["folders"], locked=False)
             self.status[user_id] = st
             return st
@@ -345,6 +423,7 @@ class Guard:
             # ABC 触发 = 这一轮结束：冻结数字、记次数、关轮
             used += 1
             sess["used"] = used
+            sess["last_since"] = sess.get("since")  # 刚结束这轮的起点，明细展示用
             sess["since"] = now.isoformat(timespec="seconds")
             sess["open"] = False
             sess["last_eps"] = sess_eps
@@ -388,52 +467,58 @@ class Guard:
             "locked": locked, "reason": reason,
             "folders": folders,
         }
+        st["episodes"] = self._build_episodes(
+            user_id, self._episode_window(sess, max_sess, used, records))
         self.status[user_id] = st
         return st
 
     def check_all(self):
-        self._maybe_new_day()
-        if not self.settings.is_configured():
-            return {}
-        try:
-            playing = self.client.now_playing()
-        except Exception:  # noqa: BLE001
-            playing = {}
-        for uid, rule in self.settings.data.get("users", {}).items():
-            if rule.get("enabled"):
-                try:
-                    self.check_user(uid, playing)
-                except Exception:  # keep polling other users
-                    logger.exception("check failed for %s", uid)
-        return self.status
+        with self._lock:
+            self._maybe_new_day()
+            if not self.settings.is_configured():
+                return {}
+            try:
+                playing = self.client.now_playing()
+            except Exception:  # noqa: BLE001
+                playing = {}
+            for uid, rule in self.settings.data.get("users", {}).items():
+                if rule.get("enabled"):
+                    try:
+                        self.check_user(uid, playing)
+                    except Exception:  # keep polling other users
+                        logger.exception("check failed for %s", uid)
+            return self.status
 
     def manual_lock(self, user_id: str):
-        rule = self.settings.get_user(user_id)
-        folders = self.client.get_enabled_folders(user_id)
-        if folders:
-            self._remember(user_id, folders)
-        keep = [f for f in folders if f in (rule.get("keep_folders") or [])]
-        self.client.set_enabled_folders(user_id, keep)
+        with self._lock:
+            rule = self.settings.get_user(user_id)
+            folders = self.client.get_enabled_folders(user_id)
+            if folders:
+                self._remember(user_id, folders)
+            keep = [f for f in folders if f in (rule.get("keep_folders") or [])]
+            self.client.set_enabled_folders(user_id, keep)
 
     def manual_unlock(self, user_id: str):
         """撤销立即锁（点错了当没发生过）：只解开关，不碰轮次/计数/加时。"""
-        rule = self.settings.get_user(user_id)
-        rule["manual_locked"] = False
-        self.settings.save()
-        backup = self._recall(user_id)
-        if backup:
-            self.client.set_enabled_folders(user_id, backup)
+        with self._lock:
+            rule = self.settings.get_user(user_id)
+            rule["manual_locked"] = False
+            self.settings.save()
+            backup = self._recall(user_id)
+            if backup:
+                self.client.set_enabled_folders(user_id, backup)
 
     def hard_lock(self, user_id: str) -> tuple[bool, str]:
         """立即锁：中断当前播放 + 持久锁定（轮询/重启不消失，跨天清零）。"""
-        self.clear_bonus(user_id)
-        rule = self.settings.get_user(user_id)
-        rule["manual_locked"] = True
-        self.settings.save()
-        stopped, detail = self.client.stop_playback(user_id)
-        self.manual_lock(user_id)  # 立刻收回媒体库
-        if stopped and "没有在播" in detail:
-            return True, "已锁定（当前没有在播）"
-        if stopped:
-            return True, f"已锁定，{detail}"
-        return False, f"已锁定媒体库，但{detail}——当前集播完后无法再播"
+        with self._lock:
+            self.clear_bonus(user_id)
+            rule = self.settings.get_user(user_id)
+            rule["manual_locked"] = True
+            self.settings.save()
+            stopped, detail = self.client.stop_playback(user_id)
+            self.manual_lock(user_id)  # 立刻收回媒体库
+            if stopped and "没有在播" in detail:
+                return True, "已锁定（当前没有在播）"
+            if stopped:
+                return True, f"已锁定，{detail}"
+            return False, f"已锁定媒体库，但{detail}——当前集播完后无法再播"

@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 import time
 
 from nicegui import app, run, ui
@@ -25,6 +26,25 @@ logger = logging.getLogger("kids-guard")
 
 settings = SettingsStore()
 guard = Guard(settings)
+
+
+def _bg_loop():
+    """真正的后台守护：不依赖任何浏览器页面开着。
+
+    之前轮询寄生在页面定时器上，没人开网页时守护完全停摆——
+    该恢复的媒体库不恢复（小孩打开 Jellyfin 全空）、该锁的也不锁。
+    """
+    while True:
+        try:
+            if settings.is_configured():
+                guard.check_all()
+        except Exception:  # noqa: BLE001
+            logger.exception("background poll failed")
+        interval = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0)) * 60
+        time.sleep(interval)
+
+
+threading.Thread(target=_bg_loop, daemon=True, name="guard-poll").start()
 
 users_cache: dict[str, str] = {}
 libs_cache: dict[str, str] = {}
@@ -137,6 +157,14 @@ def user_card(box, user_id: str):
                 ui.label(f"正在播放：{st['playing_title']}").classes("text-sm break-words")
             if st.get("checked_at"):
                 ui.label(f"数据截至 {st['checked_at']}").classes("text-xs text-gray-400 break-words")
+            eps = st.get("episodes") or []
+            if eps:
+                ui.label("本集明细（播放时长 / 总时长）").classes(
+                    "text-xs text-gray-500 mt-1 break-words")
+                for e in eps[-50:]:
+                    total = fmt_dur(e["total"]) if e.get("total") else "未知"
+                    ui.label(f"{e['series']}：{fmt_dur(e.get('played', 0))} / {total}"
+                             ).classes("text-sm break-words")
             with ui.row().classes("flex-wrap"):
                 ui.button("+5 分钟", on_click=lambda: grant_extra(user_id, "min"))
                 ui.button("+1 集", on_click=lambda: grant_extra(user_id, "eps"))
@@ -151,15 +179,11 @@ _refresh_lock = asyncio.Lock()
 
 
 async def _locked_check_all() -> bool:
-    """串行跑全量检查：已在跑就跳过，避免连点导致两次交错、数据对不上。
-
-    真正跑完才推进节拍器，手动刷新后不会再被定时器立刻重复一遍。
-    """
+    """串行跑全量检查：已在跑就跳过，避免连点导致两次交错、数据对不上。"""
     if _refresh_lock.locked():
         return False
     async with _refresh_lock:
         await run.io_bound(guard.check_all)
-    _poll_state["last"] = time.time()
     return True
 
 
@@ -279,19 +303,9 @@ def index():
     ui.timer(1.0, bootstrap, once=True)
 
 
-_poll_state = {"last": 0.0}
-
-
-async def poll_due():
-    """Polling lives inside page timers (NiceGUI forbids global-scope UI).
-
-    检查放后台线程跑，避免 Jellyfin 响应慢时卡死页面导致按钮“点了没反应”。
-    跑完顺手重绘看板，打开页面后数字会自动跟上来。
-    """
-    interval = max(0.2, float(settings.data.get("polling_minutes", 1.0) or 1.0)) * 60
-    if time.time() - _poll_state["last"] < interval:
-        return
-    if settings.is_configured() and await _locked_check_all():
+def poll_due():
+    """页面定时器只负责重绘（数据由后台线程持续更新）。"""
+    if settings.is_configured():
         render_dashboard()
 
 

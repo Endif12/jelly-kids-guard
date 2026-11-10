@@ -270,3 +270,30 @@ class JellyfinClient:
         if not durs:
             return 0, ""
         return sum(durs) // len(durs), "series_avg"
+
+    def items_info(self, user_id: str, item_ids: list[str]) -> dict[str, dict]:
+        """Batch item metadata: series name (poster page title) + total runtime."""
+        out: dict[str, dict] = {}
+        ids = [i for i in dict.fromkeys(item_ids) if i]
+        for start in range(0, len(ids), 40):
+            chunk = ids[start:start + 40]
+            try:
+                r = self._get(f"/Users/{user_id}/Items?ids={','.join(chunk)}"
+                              "&Fields=SeriesName,RunTimeTicks&Limit=200")
+            except requests.RequestException as exc:
+                logger.error("GET items info failed: %s", exc)
+                continue
+            if r.status_code != 200:
+                logger.error("GET items info HTTP %s", r.status_code)
+                continue
+            try:
+                items = (self._json.decode(r.text) or {}).get("Items", [])
+            except ValueError:
+                continue
+            for it in items:
+                out[str(it.get("Id"))] = {
+                    "series": it.get("SeriesName") or "",
+                    "name": it.get("Name") or "",
+                    "total_secs": self._ticks_to_minutes(it.get("RunTimeTicks")) * 60,
+                }
+        return out
