@@ -459,4 +459,6 @@ def server_panel():
 
 
 if __name__ in ("__main__", "__mp_main__"):
-    ui.run(host="0.0.0.0", port=8080, title="Jelly Kids Guard")
+    # reload 必须关：守护每轮都会写 settings.json/folders.bck，
+    # uvicorn 的文件监视会因此反复重启进程，造成锁/恢复抽风。
+    ui.run(host="0.0.0.0", port=8080, title="Jelly Kids Guard", reload=False)

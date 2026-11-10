@@ -220,8 +220,10 @@ class JellyfinClient:
 
     @staticmethod
     def _ticks_to_minutes(ticks) -> int:
+        # 1 tick = 100ns；1 分钟 = 60s = 6e8 ticks。
+        # （不要在这里再除以 60——那会把 60 分钟以内的条目全部算成 0）
         try:
-            return int(int(ticks) // 600_000_000 // 60)
+            return int(int(ticks) // 600_000_000)
         except (TypeError, ValueError):
             return 0
 
