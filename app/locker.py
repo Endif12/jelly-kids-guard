@@ -223,7 +223,8 @@ class Guard:
             self.settings.save()
 
     def reset_today(self, user_id: str) -> tuple[bool, str]:
-        """清零今日播放记录（测试用，不可恢复），同时撤销加时/手动锁、重置轮次."""
+        """清零今日播放记录（测试用，不可恢复），同时撤销加时/手动锁、重置轮次，
+        并立即从备份恢复媒体库（不等下次轮询）."""
         with self._lock:
             start, end = self._day_range()
             ok, msg = self.stats.reset_day(user_id, start, end)
@@ -237,7 +238,17 @@ class Guard:
                          "locked_item": None,
                          "date": self.settings.today_key()})
             self.settings.save()
+            backup = self._recall(user_id)
+            if backup:
+                self.client.set_enabled_folders(user_id, backup)
+                logger.info("reset_today restored folders for %s", user_id)
+            elif ok and not self.client.get_enabled_folders(user_id):
+                msg += "；注意：没有媒体库备份可恢复，请到 Jellyfin 后台手动给该用户勾选媒体库"
             return ok, msg
+
+    def backup_count(self, user_id: str) -> int:
+        """备份里存了多少个媒体库（诊断用）。"""
+        return len(self._recall(user_id))
 
     def _apply_folders(self, user_id: str, folders: list, locked: bool, reason: str = ""):
         rule = self.settings.get_user(user_id)

@@ -68,11 +68,28 @@ class PlaybackStats:
             logger.error("stats parse error %s", exc)
             return 0, 0
 
+    def count_day(self, user_id: str, date_start: str, date_end: str) -> int:
+        """今日该用户的记录条数；查询失败返回 -1。"""
+        sql = (f"SELECT COUNT(*) FROM PlaybackActivity "
+               f"WHERE {self._where(user_id, date_start, date_end)}")
+        data = self._query(sql)
+        rows = data.get("results") if isinstance(data, dict) else []
+        try:
+            return int(float(rows[0][0] or 0))
+        except (ValueError, TypeError, IndexError):
+            return -1
+
     def reset_day(self, user_id: str, date_start: str, date_end: str) -> tuple[bool, str]:
         """删除该用户今日播放记录（测试清零用，不可恢复）.
 
         Playback Reporting 官方前端删记录也是走 submit_custom_query 发 DELETE。
+        删除前后都 COUNT 验证，防止“静默删了 0 条还报成功”。
         """
+        before = self.count_day(user_id, date_start, date_end)
+        if before == 0:
+            return True, "今日本来就没有记录（0 条）"
+        if before < 0:
+            return False, "查询记录数失败（看日志）"
         sql = (f"DELETE FROM PlaybackActivity WHERE {self._where(user_id, date_start, date_end)}")
         data = self._query(sql)
         if not isinstance(data, dict):
@@ -81,7 +98,11 @@ class PlaybackStats:
         if "error" in msg.lower():
             logger.error("reset_day SQL error: %s", msg)
             return False, f"删除失败：{msg[:200]}"
-        return True, "今日记录已清零"
+        after = self.count_day(user_id, date_start, date_end)
+        if after > 0:
+            logger.error("reset_day left %s rows (tried to delete %s)", after, before)
+            return False, f"删除未生效：仍剩 {after} 条记录（看日志）"
+        return True, f"已删除 {before} 条今日记录"
 
     def today_rows(self, user_id: str, date_start: str, date_end: str,
                    limit: int = 500) -> list[tuple[datetime, int]]:

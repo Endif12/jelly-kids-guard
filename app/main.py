@@ -157,6 +157,12 @@ def user_card(box, user_id: str):
                 ui.label(f"正在播放：{st['playing_title']}").classes("text-sm break-words")
             if st.get("checked_at"):
                 ui.label(f"数据截至 {st['checked_at']}").classes("text-xs text-gray-400 break-words")
+            try:
+                ui.label(f"媒体库权限：{len(st.get('folders') or [])} 个 ｜ "
+                         f"备份：{guard.backup_count(user_id)} 个"
+                         ).classes("text-xs text-gray-400 break-words")
+            except Exception:  # noqa: BLE001
+                pass
             with ui.row().classes("flex-wrap"):
                 ui.button("+5 分钟", on_click=lambda: grant_extra(user_id, "min"))
                 ui.button("+1 集", on_click=lambda: grant_extra(user_id, "eps"))
