@@ -177,7 +177,8 @@ def user_card(box, user_id: str):
                 "text-xs text-gray-500 mt-2 break-words")
             for e in eps[-50:]:
                 total = fmt_dur(e["total"]) if e.get("total") else "未知"
-                ui.label(f"{e['series']}：{fmt_dur(e.get('played', 0))} / {total}"
+                suffix = "｜未取到条目信息" if not e.get("meta_ok") else ""
+                ui.label(f"{e['series']}：{fmt_dur(e.get('played', 0))} / {total}{suffix}"
                          ).classes("text-sm break-words")
 
 
@@ -307,6 +308,8 @@ def index():
 
     ui.timer(15.0, poll_due)
     ui.timer(1.0, bootstrap, once=True)
+    ui.label(f"版本 {os.environ.get('APP_VERSION', 'dev')[:8]}").classes(
+        "text-xs text-gray-400 mt-2")
 
 
 def poll_due():

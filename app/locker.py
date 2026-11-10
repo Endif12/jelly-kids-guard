@@ -334,7 +334,8 @@ class Guard:
             m = meta.get(r["item_id"], {})
             series = m.get("series") or r.get("name") or "未知节目"
             episodes.append({"series": series, "played": r["secs"],
-                             "total": int(m.get("total_secs") or 0)})
+                             "total": int(m.get("total_secs") or 0),
+                             "meta_ok": bool(m)})
         return episodes
 
     def _check_user_locked(self, user_id: str, playing: dict | None = None) -> dict:

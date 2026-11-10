@@ -6,6 +6,8 @@ COPY requirements.txt ./
 RUN python -m pip install --no-cache-dir -r requirements.txt
 
 FROM python:3.11-slim AS release
+ARG GIT_SHA=dev
+ENV APP_VERSION=${GIT_SHA}
 COPY --from=builder /usr/local/lib/python3.11/site-packages /usr/local/lib/python3.11/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 WORKDIR /app

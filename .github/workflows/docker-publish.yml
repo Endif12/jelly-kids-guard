@@ -52,6 +52,8 @@ jobs:
           file: ./dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
@@ -72,6 +74,8 @@ jobs:
           file: ./dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
+          build-args: |
+            GIT_SHA=${{ github.sha }}
           tags: ${{ steps.meta_hub.outputs.tags }}
           labels: ${{ steps.meta_hub.outputs.labels }}
           cache-from: type=gha
