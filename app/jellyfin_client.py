@@ -273,24 +273,32 @@ class JellyfinClient:
         return sum(durs) // len(durs), "series_avg"
 
     def items_info(self, user_id: str, item_ids: list[str]) -> dict[str, dict]:
-        """Batch item metadata: series name (poster page title) + total runtime."""
+        """Batch item metadata: series name (poster page title) + total runtime.
+
+        用管理员的 /Items（比 /Users/{uid}/Items 稳）；Fields 只放合法枚举值
+        RunTimeTicks——SeriesName 不是枚举值，混进去会导致整个 Fields 被丢弃，
+        返回默认字段集（有 SeriesName 却没有 RunTimeTicks）。
+        """
         out: dict[str, dict] = {}
         ids = [i for i in dict.fromkeys(item_ids) if i]
         for start in range(0, len(ids), 40):
             chunk = ids[start:start + 40]
             try:
-                r = self._get(f"/Users/{user_id}/Items?ids={','.join(chunk)}"
-                              "&Fields=SeriesName,RunTimeTicks&Limit=200")
+                r = self._get(f"/Items?ids={','.join(chunk)}"
+                              "&Fields=RunTimeTicks&Limit=200")
             except requests.RequestException as exc:
                 logger.error("GET items info failed: %s", exc)
                 continue
             if r.status_code != 200:
-                logger.error("GET items info HTTP %s", r.status_code)
+                logger.error("GET items info HTTP %s %s", r.status_code, r.text[:200])
                 continue
             try:
                 items = (self._json.decode(r.text) or {}).get("Items", [])
             except ValueError:
                 continue
+            if not items and chunk:
+                logger.warning("items info: no data for %s ids, body=%s",
+                               len(chunk), r.text[:200])
             for it in items:
                 out[str(it.get("Id"))] = {
                     "series": it.get("SeriesName") or "",

@@ -279,11 +279,19 @@ class Guard:
             return self._check_user_locked(user_id, playing)
 
     def _item_meta(self, user_id: str, item_ids: list[str]) -> dict[str, dict]:
-        """Item metadata with TTL cache; batch lookup, never raises."""
+        """Item metadata with TTL cache; batch lookup, never raises.
+
+        查不到剧名也没有总时长的条目不入缓存，下轮轮询自动重试。
+        """
         now_ts = time.time()
+
+        def usable(info: dict) -> bool:
+            return bool(info.get("series")) or int(info.get("total_secs") or 0) > 0
+
         need = [iid for iid in dict.fromkeys(item_ids) if iid
                 and (iid not in self._item_cache
-                     or now_ts - self._item_cache[iid][0] > ITEM_TTL)]
+                     or now_ts - self._item_cache[iid][0] > ITEM_TTL
+                     or not usable(self._item_cache[iid][1]))]
         if need:
             try:
                 infos = self.client.items_info(user_id, need)
@@ -291,11 +299,12 @@ class Guard:
                 logger.exception("items_info failed")
                 infos = {}
             for iid, info in infos.items():
-                self._item_cache[iid] = (now_ts, info)
+                if usable(info):
+                    self._item_cache[iid] = (now_ts, info)
         out = {}
         for iid in item_ids:
             cached = self._item_cache.get(iid)
-            if cached:
+            if cached and usable(cached[1]):
                 out[iid] = cached[1]
         return out
 
