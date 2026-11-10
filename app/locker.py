@@ -95,7 +95,8 @@ class Guard:
                     sess.update({"date": today, "used": 0, "since": None,
                                  "cooldown_until": None, "open": True,
                                  "last_eps": None, "last_mins": None,
-                                 "last_secs": None, "last_since": None})
+                                 "last_secs": None, "last_since": None,
+                                 "locked_item": None})
                     if rule.get("enabled"):
                         backup = self._recall(uid)
                         if backup:
@@ -125,17 +126,25 @@ class Guard:
             rule["bonus_min_base"] = None
 
     def _sess(self, user_id: str) -> dict:
-        """取今日 sitting 状态（含跨天滚动），调用方改完后需 save。"""
+        """取今日 sitting 状态（含跨天滚动与旧版状态自愈），调用方改完后需 save。"""
+        from datetime import datetime
+
         rule = self.settings.get_user(user_id)
         st = rule.setdefault("sess", {"date": "", "used": 0, "since": None,
                                       "cooldown_until": None, "open": True,
                                       "last_eps": None, "last_mins": None,
-                                      "last_secs": None, "last_since": None})
+                                      "last_secs": None, "last_since": None,
+                                      "locked_item": None})
         today = self.settings.today_key()
         if st.get("date") != today:
             st.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
                        "open": True, "last_eps": None, "last_mins": None,
-                       "last_secs": None, "last_since": None})
+                       "last_secs": None, "last_since": None, "locked_item": None})
+        # 旧版本 settings.json 缺 open/since 字段时会出现
+        # “轮开着、起点未知、但次数已消耗”的矛盾状态：把本轮起点定为现在，
+        # 避免把今天全部记录再算一轮、重复触发。
+        if st.get("open", True) and st.get("used", 0) > 0 and not st.get("since"):
+            st["since"] = datetime.now().isoformat(timespec="seconds")
         return st
 
     @staticmethod
@@ -225,6 +234,7 @@ class Guard:
             sess.update({"used": 0, "since": None, "cooldown_until": None,
                          "open": True, "last_eps": None, "last_mins": None,
                          "last_secs": None, "last_since": None,
+                         "locked_item": None,
                          "date": self.settings.today_key()})
             self.settings.save()
             return ok, msg
@@ -349,6 +359,7 @@ class Guard:
             cur_m = [r for r in records if since_d is None or r["ts"] >= since_d]
             st["episodes"] = self._build_episodes(user_id, cur_m)
             self._apply_folders(user_id, st["folders"], locked=True, reason=st["reason"])
+            self._enforce_stop(user_id, sess, playing, manual=True)
             self.status[user_id] = st
             return st
 
@@ -429,6 +440,13 @@ class Guard:
             sess["last_eps"] = sess_eps
             sess["last_mins"] = sess_mins
             sess["last_secs"] = sum(s for _, s in cur)
+            # 记下触发那一刻正在播的那集：它允许播完（你的规则），
+            # 客户端“自动连播”起播的下一集将被立刻中断。
+            try:
+                detail = self.client.session_detail().get(user_id) or {}
+                sess["locked_item"] = detail.get("item_id") or None
+            except Exception:  # noqa: BLE001
+                sess["locked_item"] = None
             if gap_h > 0 and used < max_sess:
                 sess["cooldown_until"] = (now + timedelta(hours=gap_h)).isoformat(timespec="seconds")
                 resume_at = now + timedelta(hours=gap_h)
@@ -442,6 +460,9 @@ class Guard:
             self.settings.save()
         folders = self.client.get_enabled_folders(user_id)
         self._apply_folders(user_id, folders, locked, reason if locked else "")
+        if locked:
+            # 软锁管不住已在播放器里的“自动连播”：被锁后起播的新集直接中断
+            self._enforce_stop(user_id, sess, playing)
 
         # 展示：开轮显示实时累计；关轮显示冻结数字；配额用完则本轮即全天。
         if sess.get("open", True) or sess.get("last_eps") is None:
@@ -471,6 +492,34 @@ class Guard:
             user_id, self._episode_window(sess, max_sess, used, records))
         self.status[user_id] = st
         return st
+
+    def _enforce_stop(self, user_id: str, sess: dict, playing: dict, manual: bool = False):
+        """锁定状态下发现仍在播：非触发时的那一集就中断.
+
+        manual=True（手动锁）时无条件中断任何在播会话。
+        """
+        if not playing or user_id not in playing:
+            return
+        try:
+            detail = (self.client.session_detail() or {}).get(user_id) or {}
+        except Exception:  # noqa: BLE001
+            return
+        cur_item = str(detail.get("item_id") or "")
+        if manual:
+            stopped, msg = self.client.stop_playback(user_id)
+            logger.info("manual lock stop %s: %s", user_id, msg)
+            return
+        if not cur_item:
+            return
+        locked_item = sess.get("locked_item")
+        if locked_item is None:
+            # 没记录过（旧状态）：把当前在播的当作“允许播完的那集”
+            sess["locked_item"] = cur_item
+            self.settings.save()
+            return
+        if cur_item != str(locked_item):
+            stopped, msg = self.client.stop_playback(user_id)
+            logger.info("autoplay guard %s: post-lock playback stopped (%s)", user_id, msg)
 
     def check_all(self):
         with self._lock:

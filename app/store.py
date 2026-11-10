@@ -53,7 +53,7 @@ def default_user_rule():
         # open=本轮是否还开着；last_eps/last_mins=上一轮冻结数字（关轮后展示用）。
         "sess": {"date": "", "used": 0, "since": None, "cooldown_until": None,
                  "open": True, "last_eps": None, "last_mins": None,
-                 "last_secs": None, "last_since": None},
+                 "last_secs": None, "last_since": None, "locked_item": None},
         "days": {str(i): default_day_rule() for i in range(7)},
     }
 
@@ -80,7 +80,7 @@ def _migrate(settings: dict) -> dict:
         full.pop("bonus_minutes", None)
         sess = {"date": "", "used": 0, "since": None, "cooldown_until": None,
                 "open": True, "last_eps": None, "last_mins": None,
-                "last_secs": None, "last_since": None}
+                "last_secs": None, "last_since": None, "locked_item": None}
         sess.update(full.get("sess") or {})
         full["sess"] = sess
         days = {}

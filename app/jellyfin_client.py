@@ -214,6 +214,7 @@ class JellyfinClient:
                 "title": item.get("Name") or item.get("SeriesName") or "",
                 "series_id": item.get("SeriesId") or "",
                 "series_name": item.get("SeriesName") or "",
+                "item_id": str(item.get("Id") or ""),
             }
         return detail
 
