@@ -275,7 +275,21 @@ def render_dashboard():
 @ui.page("/", title="Jelly Kids Guard")
 def index():
     ui.label("Jelly Kids Guard｜儿童观影守护").classes("text-2xl font-bold break-words")
-    ui.label("A保障 + B软上限 + C硬上限（下集预判），超限软锁（当前集播完，下一集打不开）。").classes("text-gray-500 break-words")
+    ui.label("规则语义（A ≤ B ≤ C）").classes("text-sm font-bold text-gray-600 break-words")
+    ui.label("A — 最低保障时长：不论放了多少集，至少保证看满 A 分钟才允许停止。"
+             "例：A=30，儿歌 2 分钟一集——按集数早该停了，但没看满 30 分钟就继续放。"
+             ).classes("text-xs text-gray-500 break-words")
+    ui.label("B — 软上限：与集数同时生效，谁先到按谁停。例：B=35、集数=2 ——"
+             "放到第 3 集共 32 分钟：A 已满足，集数超上限 → 停止；"
+             "放到第 1 集共 36 分钟：单集超 B → 该集播完即停。"
+             ).classes("text-xs text-gray-500 break-words")
+    ui.label("C — 硬上限（下集预判）：在下一集开播前拦截。例：C=60 ——放了 1 集共 31 分钟，"
+             "B 和集数都没超；预估下一集约 31 分钟，31+31=62 > 60 → 不再起播下一集，"
+             "当前集播完即停。"
+             ).classes("text-xs text-gray-500 break-words")
+    ui.label("触发软锁：收回媒体库，正在播的一集允许播完，下一集打不开"
+             "（自动连播起播的下一集也会被中断）。一次完整触发 = 已完成 1 次。"
+             ).classes("text-xs text-gray-500 break-words")
 
     with ui.dialog() as dlg, ui.card():
         ui.label("确定清零今日播放记录吗？").classes("font-bold break-words")
@@ -379,11 +393,9 @@ def rules_editor(options):
             ui.label("白名单：超限锁定后仍保留的库").classes("text-xs text-gray-500 break-words")
             ui.label("按星期设置每天上限（0 = 不限该项，需满足 A≤B≤C）").classes(
                 "font-bold mt-2 break-words")
-            ui.label("集数=最多集数 B=软上限(分) C=硬上限(分) 次数=观看次数 间隔=两次间隔(小时)").classes(
-                "text-xs text-gray-500 break-words")
             with ui.grid(columns=6).classes("gap-2").style(
                     "grid-template-columns: 2.5em repeat(5, minmax(0, 1fr));"):
-                for h in ["星期", "集数", "B分", "C分", "次数", "间隔h"]:
+                for h in ["星期", "集数", "B(min)", "C(min)", "观看次数", "间隔(h)"]:
                     ui.label(h).classes("font-bold text-sm").style(
                         "white-space: normal; word-break: break-all;")
                 for i, wd in enumerate(WEEKDAYS):
