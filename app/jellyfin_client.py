@@ -257,7 +257,7 @@ class JellyfinClient:
 
     def series_average_minutes(self, user_id: str, series_id: str) -> tuple[int, str]:
         try:
-            r = self._get(f"/Users/{user_id}/Items?ParentId={series_id}&Recursive=true"
+            r = self._get(f"/Items?ParentId={series_id}&Recursive=true"
                           "&IncludeItemTypes=Episode&Fields=RunTimeTicks&Limit=200")
         except requests.RequestException as exc:
             logger.error("GET series episodes failed: %s", exc)
@@ -304,6 +304,7 @@ class JellyfinClient:
             for it in items:
                 out[str(it.get("Id"))] = {
                     "series": it.get("SeriesName") or "",
+                    "series_id": str(it.get("SeriesId") or ""),
                     "name": it.get("Name") or "",
                     "total_secs": self._ticks_to_minutes(it.get("RunTimeTicks")) * 60,
                 }

@@ -136,8 +136,14 @@ def user_card(box, user_id: str):
             ui.label(f"本次上限：{fmt_limit(max_eps)} 集 / "
                      f"B {fmt_limit(soft_b)} 分钟 / C {fmt_limit(hard_c)} 分钟 ｜ "
                      f"保障 A：{rule.get('min_minutes', 0)} 分钟").classes("break-words")
-            if st.get("est_next"):
-                ui.label(f"下集预判约 {st['est_next']} 分钟（{st.get('est_src', '')}）").classes("text-sm text-gray-500 break-words")
+            est = st.get("est_next") or st.get("last_est")
+            if est:
+                src = st.get("est_src") or st.get("last_est_src") or ""
+                label = {"next": "真实下一集", "series_avg": "本剧平均",
+                         "last_ep": "上集时长", "fallback": "兜底值",
+                         "today_avg": "今日平均"}.get(src, "估算")
+                ui.label(f"下集预判约 {est} 分钟（{label}）").classes(
+                    "text-sm text-gray-500 break-words")
             if st.get("sess_max"):
                 sess_line = f"今日已完成 {st.get('sess_used', 0)} 次 / 上限 {st['sess_max']} 次"
                 if st.get("resume_at"):

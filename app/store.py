@@ -50,10 +50,13 @@ def default_user_rule():
         # “一次”= 完整 ABC 周期：从上次 ABC 锁（或冷却结束/手动解锁/
         # 新的一天）之后开始累计，ABC 触发才算用掉一次。
         # used=今日已完成次数；since=本轮开始时间(ISO)；cooldown_until=冷却到何时；
-        # open=本轮是否还开着；last_eps/last_mins=上一轮冻结数字（关轮后展示用）。
+        # open=本轮是否还开着；last_eps/last_mins=上一轮冻结数字（关轮后展示用）；
+        # last_reason/last_est/last_at=上一轮为何结束（配额用完后仍可解释）。
         "sess": {"date": "", "used": 0, "since": None, "cooldown_until": None,
                  "open": True, "last_eps": None, "last_mins": None,
-                 "last_secs": None, "last_since": None, "locked_item": None},
+                 "last_secs": None, "last_since": None, "locked_item": None,
+                 "last_reason": None, "last_est": 0, "last_est_src": "",
+                 "last_at": ""},
         "days": {str(i): default_day_rule() for i in range(7)},
     }
 
@@ -80,7 +83,9 @@ def _migrate(settings: dict) -> dict:
         full.pop("bonus_minutes", None)
         sess = {"date": "", "used": 0, "since": None, "cooldown_until": None,
                 "open": True, "last_eps": None, "last_mins": None,
-                "last_secs": None, "last_since": None, "locked_item": None}
+                "last_secs": None, "last_since": None, "locked_item": None,
+                "last_reason": None, "last_est": 0, "last_est_src": "",
+                "last_at": ""}
         sess.update(full.get("sess") or {})
         full["sess"] = sess
         days = {}

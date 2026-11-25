@@ -37,6 +37,7 @@ class Guard:
         # 轮次/次数/加时等状态不被双计数。
         self._lock = threading.RLock()
         self._item_cache: dict[str, tuple[float, dict]] = {}
+        self._series_cache: dict[str, tuple[float, int]] = {}
         self.reconnect()
 
     # ----- wiring -----------------------------------------------------
@@ -96,15 +97,21 @@ class Guard:
                                  "cooldown_until": None, "open": True,
                                  "last_eps": None, "last_mins": None,
                                  "last_secs": None, "last_since": None,
-                                 "locked_item": None})
+                                 "locked_item": None, "last_reason": None,
+                                 "last_est": 0, "last_est_src": "", "last_at": ""})
                     if rule.get("enabled"):
                         backup = self._recall(uid)
                         if backup:
                             self.client.set_enabled_folders(uid, backup)
                 self.settings.save()
 
-    def estimate_next_minutes(self, user_id: str, eps: int, mins: int) -> tuple[int, str]:
-        """Cascade: real NextUp > series average > today's average > fallback."""
+    def estimate_next_minutes(self, user_id: str, last_item_id: str = "",
+                              last_mins: int = 0) -> tuple[int, str]:
+        """Cascade: real NextUp > series average > last episode > fallback.
+
+        不再用“今日平均”当下一集：一天里长短条目混杂（比如只看了一条 33 分钟
+        的合辑），今日平均会把 C 门控算歪，导致明明没到 B/集数就被 C 提前锁掉。
+        """
         try:
             est, src = self.client.next_episode_minutes(user_id)
         except Exception:  # noqa: BLE001
@@ -112,8 +119,26 @@ class Guard:
             est, src = 0, ""
         if est > 0:
             return est, src
-        if eps > 0 and mins > 0:
-            return mins // eps, "today_avg"
+        # 没在播（或随机点播）拿不到 NextUp：用上一条记录所属剧集的平均集长
+        if last_item_id:
+            info = self._item_meta(user_id, [last_item_id]).get(last_item_id) or {}
+            series_id = info.get("series_id") or ""
+            if series_id:
+                now_ts = time.time()
+                cached = self._series_cache.get(series_id)
+                if cached and now_ts - cached[0] <= ITEM_TTL:
+                    avg = cached[1]
+                else:
+                    try:
+                        avg, _ = self.client.series_average_minutes(user_id, series_id)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("series average failed")
+                        avg = 0
+                    self._series_cache[series_id] = (now_ts, avg)
+                if avg > 0:
+                    return int(avg), "series_avg"
+        if last_mins > 0:
+            return int(last_mins), "last_ep"
         fallback = int(self.settings.data.get("fallback_episode_minutes", 25) or 0)
         return (fallback, "fallback") if fallback > 0 else (0, "")
 
@@ -134,12 +159,15 @@ class Guard:
                                       "cooldown_until": None, "open": True,
                                       "last_eps": None, "last_mins": None,
                                       "last_secs": None, "last_since": None,
-                                      "locked_item": None})
+                                      "locked_item": None, "last_reason": None,
+                                      "last_est": 0, "last_est_src": "", "last_at": ""})
         today = self.settings.today_key()
         if st.get("date") != today:
             st.update({"date": today, "used": 0, "since": None, "cooldown_until": None,
                        "open": True, "last_eps": None, "last_mins": None,
-                       "last_secs": None, "last_since": None, "locked_item": None})
+                       "last_secs": None, "last_since": None, "locked_item": None,
+                       "last_reason": None, "last_est": 0, "last_est_src": "",
+                       "last_at": ""})
         # 旧版本 settings.json 缺 open/since 字段时会出现
         # “轮开着、起点未知、但次数已消耗”的矛盾状态：把本轮起点定为现在，
         # 避免把今天全部记录再算一轮、重复触发。
@@ -235,7 +263,8 @@ class Guard:
             sess.update({"used": 0, "since": None, "cooldown_until": None,
                          "open": True, "last_eps": None, "last_mins": None,
                          "last_secs": None, "last_since": None,
-                         "locked_item": None,
+                         "locked_item": None, "last_reason": None,
+                         "last_est": 0, "last_est_src": "", "last_at": "",
                          "date": self.settings.today_key()})
             self.settings.save()
             backup = self._recall(user_id)
@@ -434,14 +463,27 @@ class Guard:
             locked, reason = boundary_lock(sess_eps, sess_mins, max_eps, soft_b, min_a)
             abc_fired = locked
             if not locked and hard_c > 0 and sess_mins > 0:
-                est_next, est_src = self.estimate_next_minutes(user_id, day_eps, day_mins)
+                cur_recs = [r for r in records if since is None or r["ts"] >= since]
+                last_rec = cur_recs[-1] if cur_recs else {}
+                est_next, est_src = self.estimate_next_minutes(
+                    user_id, str(last_rec.get("item_id") or ""),
+                    int(last_rec.get("secs") or 0) // 60)
                 locked, reason = next_gate(sess_mins, est_next, hard_c)
                 abc_fired = abc_fired or locked
+                logger.info("gate %s: %s min + next ~%s (%s) vs C %s -> %s",
+                            user_id, sess_mins, est_next, est_src or "?",
+                            hard_c, "LOCK" if locked else "allow")
         resume_at = None
         used = int(sess.get("used", 0) or 0)
         if not locked and max_sess > 0:
             if used >= max_sess:
-                locked, reason = True, f"今日已完成 {used} 次（上限 {max_sess} 次），明天再看"
+                locked = True
+                reason = f"今日已完成 {used} 次（上限 {max_sess} 次），明天再看"
+                last_reason = sess.get("last_reason")
+                if last_reason:
+                    at = sess.get("last_at") or ""
+                    reason += (f"；上一轮结束于 {at}：{last_reason}" if at
+                               else f"；上一轮结束原因：{last_reason}")
             else:
                 cd2 = self._parse(sess.get("cooldown_until"))
                 if cd2 is not None and now < cd2:
@@ -476,6 +518,11 @@ class Guard:
                 sess["cooldown_until"] = None
                 if used < max_sess:
                     sess["open"] = True  # 间隔=0：新一轮紧接着开
+            # 记住这一轮是怎么结束的：配额用完后卡片仍能解释“为什么已完成”
+            sess["last_reason"] = reason
+            sess["last_est"] = est_next
+            sess["last_est_src"] = est_src
+            sess["last_at"] = now.strftime("%H:%M")
             dirty = True
         if dirty:
             self.settings.save()
@@ -501,6 +548,9 @@ class Guard:
             "ongoing": bool(playing) and user_id in (playing or {}),
             "max_eps": max_eps, "soft_b": soft_b, "hard_c": hard_c,
             "min_a": min_a, "est_next": est_next, "est_src": est_src,
+            "last_est": int(sess.get("last_est") or 0),
+            "last_est_src": sess.get("last_est_src") or "",
+            "last_at": sess.get("last_at") or "",
             "sess_used": used, "sess_max": max_sess,
             "bonus_eps": 0, "bonus_min": 0,
             "resume_at": resume_at.strftime("%H:%M") if resume_at else "",
