@@ -8,6 +8,7 @@ the next episode / movie can no longer be opened.
 from __future__ import annotations
 
 import logging
+import json
 import os
 import threading
 import time
@@ -38,6 +39,10 @@ class Guard:
         self._lock = threading.RLock()
         self._item_cache: dict[str, tuple[float, dict]] = {}
         self._series_cache: dict[str, tuple[float, int]] = {}
+        # 播放位置采样：{uid|item_id: {day, pos, rewound}}，用于区分
+        # “暂停挂机”（插件会多算）与“后退回看”（应正常计入）。
+        self._watch: dict[str, dict] = {}
+        self._load_watch()
         self.reconnect()
 
     # ----- wiring -----------------------------------------------------
@@ -74,6 +79,83 @@ class Guard:
     def _recall(self, user_id: str) -> list:
         return list(self._read_backup().get(user_id, []) or [])
 
+    # ----- playback position sampling ---------------------------------
+    def _watch_path(self) -> str:
+        return os.path.join(os.environ.get("DATA_DIR", "data"), "watch.json")
+
+    def _load_watch(self):
+        today = self.settings.today_key()
+        try:
+            with open(self._watch_path(), "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+        except (OSError, ValueError):
+            self._watch = {}
+            return
+        self._watch = {k: v for k, v in (data or {}).items()
+                       if isinstance(v, dict) and v.get("day") == today}
+
+    def _save_watch(self):
+        try:
+            path = self._watch_path()
+            os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._watch, fh)
+            os.replace(tmp, path)
+        except OSError:
+            logger.exception("save watch.json failed")
+
+    def _track_playback(self, detail: dict):
+        """采样在播条目的播放位置，识别“后退回看”。
+
+        暂停时位置不动 -> 不会误判；位置倒退超过 30 秒 -> 标记回看。
+        之后该条目即使播放时长超过总时长，也按真实回看计入（不封顶）。
+        """
+        today = self.settings.today_key()
+        changed = False
+        for uid, d in (detail or {}).items():
+            item = str(d.get("item_id") or "")
+            pos = d.get("position_secs")
+            if not item or pos is None:
+                continue
+            key = f"{uid}|{item}"
+            st = self._watch.get(key)
+            if not st or st.get("day") != today:
+                self._watch[key] = {"day": today, "pos": int(pos), "rewound": False}
+                continue
+            if int(pos) < int(st.get("pos", pos)) - 30:
+                st["rewound"] = True
+                changed = True
+            st["pos"] = int(pos)
+        if changed:
+            self._save_watch()
+
+    def _rewound(self, user_id: str, item_id: str) -> bool:
+        st = self._watch.get(f"{user_id}|{item_id}") or {}
+        return bool(st.get("rewound"))
+
+    def _apply_pause_cap(self, user_id: str, records: list[dict]) -> list[dict]:
+        """单条记录时长 > 条目总时长且没检测到回看 -> 视为暂停/挂机，按总时长封顶。
+
+        Playback Reporting 只在客户端上报“暂停”时才扣暂停时间；有些客户端
+        暂停后不再上报进度，插件就会把挂机时间算成播放（22 分钟的集显示
+        33 分钟）。这里用“总时长 + 是否发生过后退”来纠正：
+        真回看（有后退）照常计入，挂机则封顶到总时长。
+        """
+        if not records:
+            return records
+        meta = self._item_meta(user_id, [r["item_id"] for r in records])
+        out = []
+        for r in records:
+            total = int((meta.get(r["item_id"]) or {}).get("total_secs") or 0)
+            rec = dict(r)
+            if (total > 0 and r["secs"] > total + 30
+                    and not self._rewound(user_id, r["item_id"])):
+                rec["secs"] = total
+                rec["capped"] = True
+            out.append(rec)
+        return out
+
     # ----- main loop ---------------------------------------------------
     def _day_range(self):
         now = datetime.now()
@@ -85,6 +167,7 @@ class Guard:
             if today != self.last_day:
                 logger.info("new day %s: reset bonus/sitting + restore folders", today)
                 self.last_day = today
+                self._watch = {}
                 for uid, rule in self.settings.data.get("users", {}).items():
                     rule["bonus_eps"] = 0
                     rule["bonus_eps_base"] = None
@@ -364,7 +447,7 @@ class Guard:
             series = m.get("series") or r.get("name") or "未知节目"
             episodes.append({"series": series, "played": r["secs"],
                              "total": int(m.get("total_secs") or 0),
-                             "meta_ok": bool(m)})
+                             "meta_ok": bool(m), "capped": bool(r.get("capped"))})
         return episodes
 
     def _check_user_locked(self, user_id: str, playing: dict | None = None) -> dict:
@@ -375,6 +458,7 @@ class Guard:
         # 单快照：今日和本次都从同一批明细行算，避免两次查询之间
         # 正在播的记录又涨了几分钟导致两边对不上。
         records = self.stats.today_records(user_id, start, end)
+        records = self._apply_pause_cap(user_id, records)
         rows_all = [(r["ts"], r["secs"]) for r in records]
         day_eps = len(rows_all)
         day_mins = sum(s for _, s in rows_all) // 60
@@ -598,9 +682,12 @@ class Guard:
             if not self.settings.is_configured():
                 return {}
             try:
-                playing = self.client.now_playing()
+                detail = self.client.session_detail()
             except Exception:  # noqa: BLE001
-                playing = {}
+                detail = {}
+            playing = {uid: d.get("title", "") for uid, d in detail.items()
+                       if d.get("title")}
+            self._track_playback(detail)
             for uid, rule in self.settings.data.get("users", {}).items():
                 if rule.get("enabled"):
                     try:

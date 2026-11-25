@@ -183,7 +183,14 @@ def user_card(box, user_id: str):
                 "text-xs text-gray-500 mt-2 break-words")
             for e in eps[-50:]:
                 total = fmt_dur(e["total"]) if e.get("total") else "未知"
-                suffix = "｜未取到条目信息" if not e.get("meta_ok") else ""
+                suffix = ""
+                notes = []
+                if not e.get("meta_ok"):
+                    notes.append("未取到条目信息")
+                if e.get("capped"):
+                    notes.append("暂停/挂机已扣除")
+                if notes:
+                    suffix = "｜" + "，".join(notes)
                 ui.label(f"{e['series']}：{fmt_dur(e.get('played', 0))} / {total}{suffix}"
                          ).classes("text-sm break-words")
 

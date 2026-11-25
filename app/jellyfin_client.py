@@ -215,8 +215,21 @@ class JellyfinClient:
                 "series_id": item.get("SeriesId") or "",
                 "series_name": item.get("SeriesName") or "",
                 "item_id": str(item.get("Id") or ""),
+                # 播放位置/暂停状态：用于识别“暂停挂机”与“后退回看”
+                "position_secs": self._ticks_to_seconds(
+                    (s.get("PlayState") or {}).get("PositionTicks")),
+                "paused": bool((s.get("PlayState") or {}).get("IsPaused")),
+                "runtime_secs": self._ticks_to_seconds(item.get("RunTimeTicks")),
             }
         return detail
+
+    @staticmethod
+    def _ticks_to_seconds(ticks) -> int:
+        # 1 tick = 100ns -> 1 秒 = 10,000,000 ticks
+        try:
+            return int(int(ticks) // 10_000_000)
+        except (TypeError, ValueError):
+            return 0
 
     @staticmethod
     def _ticks_to_minutes(ticks) -> int:
@@ -306,6 +319,7 @@ class JellyfinClient:
                     "series": it.get("SeriesName") or "",
                     "series_id": str(it.get("SeriesId") or ""),
                     "name": it.get("Name") or "",
-                    "total_secs": self._ticks_to_minutes(it.get("RunTimeTicks")) * 60,
+                    # 秒级精确总时长（封顶/展示都用它，避免分钟取整误差）
+                    "total_secs": self._ticks_to_seconds(it.get("RunTimeTicks")),
                 }
         return out
